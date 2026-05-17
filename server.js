@@ -229,8 +229,21 @@ app.post('/submit', upload.single('receipt'), async (req, res) => {
           role: 'user',
           content: [
             { type: 'image', source: { type: 'base64', media_type: mediaType, data: b64 } },
-            { type: 'text', text: `Analyze this bank receipt. Return ONLY JSON, no extra text:
-{"amount":<number or null>,"currency":"<OMR if unclear>","date":"<YYYY-MM-DD or null>","detected_id":"<ID number on receipt or null>","bank_name":"<bank or null>","is_legit_receipt":<true/false>,"suspicion_reason":"<reason or null>"}` }
+            { type: 'text', text: `This is a bank payment receipt from Oman. Extract the following information carefully.
+
+The AMOUNT is the total money transferred/paid. Look for labels like: Amount, Total, مبلغ, الإجمالي, Payment Amount, Transfer Amount, Paid Amount, Net Amount. It is usually the largest number on the receipt.
+
+The ID number is a 6-7 digit employee/rider ID number.
+
+Return ONLY this JSON with no extra text:
+{
+  "amount": <the payment amount as a number, e.g. 45.500, or null if truly not visible>,
+  "currency": "OMR",
+  "date": "<YYYY-MM-DD or null>",
+  "detected_id": "<6-7 digit ID number visible on receipt or null>",
+  "bank_name": "<bank name or null>",
+  "is_legit_receipt": <true if this looks like a real bank/payment receipt, false if it's a photo of something else>
+}` }
           ]
         }]
       });
@@ -240,20 +253,24 @@ app.post('/submit', upload.single('receipt'), async (req, res) => {
       console.error('AI error:', e.message);
     }
 
-    // Fraud checks
+    // Fraud checks — only flag for real fraud, not AI reading issues
     const flags = [];
-    let status = 'pending';
+    let status = 'approved';
 
-    if (!aiResult.is_legit_receipt) flags.push('Receipt looks suspicious: ' + (aiResult.suspicion_reason || 'unknown'));
-    if (!aiResult.amount) flags.push('Amount not detected');
-    if (aiResult.detected_id && aiResult.detected_id !== rider_id) flags.push(`ID on receipt (${aiResult.detected_id}) doesn't match selected rider (${rider_id})`);
-    if (isDuplicate) flags.push('This rider already submitted today');
-
-    if (flags.length === 0) {
-      status = 'approved';
-    } else {
+    // Real fraud: ID on receipt doesn't match the rider who submitted
+    if (aiResult.detected_id && aiResult.detected_id !== rider_id && riderMap && !Object.values(riderMap || {}).includes(aiResult.detected_id)) {
+      flags.push(`ID on receipt (${aiResult.detected_id}) doesn't match rider ID (${rider_id})`);
       status = 'flagged';
     }
+
+    // Real fraud: same rider already submitted today
+    if (isDuplicate) {
+      flags.push('This rider already submitted today — possible duplicate');
+      status = 'flagged';
+    }
+
+    // Soft flag only (still approved): amount not detected — admin enters manually
+    const needsAmount = !aiResult.amount;
 
     const submission = {
       id: Date.now().toString(),
@@ -261,11 +278,12 @@ app.post('/submit', upload.single('receipt'), async (req, res) => {
       rider_name: rider.name,
       amount: aiResult.amount || null,
       currency: aiResult.currency || 'OMR',
-      bank: aiResult.bank_name || null,
+      bank: aiResult.bank_name || 'Bank',
       date: today,
       submitted_at: new Date().toISOString(),
       status,
       flags,
+      needs_amount: needsAmount,
       detected_id: aiResult.detected_id || null,
       image_b64: b64,
       image_type: mediaType
@@ -274,8 +292,8 @@ app.post('/submit', upload.single('receipt'), async (req, res) => {
     submissions.push(submission);
     saveSubmissions();
 
-    // Auto-write to sheet if clean
-    if (status === 'approved') {
+    // Auto-write to sheet if approved and amount known
+    if (status === 'approved' && aiResult.amount) {
       await appendToSheet([submission.date, submission.rider_name, submission.rider_id, submission.amount, submission.bank]);
     }
 
@@ -356,18 +374,17 @@ app.get('/admin', requireAdmin, (req, res) => {
         <span class="badge ${s.status === 'approved' ? 'ok' : s.status === 'flagged' ? 'flagged' : 'rej'}">
           ${s.status === 'approved' ? '✓ Approved' : s.status === 'flagged' ? '⚠ Flagged' : '✗ Rejected'}
         </span>
-        ${s.status === 'flagged' ? `
-          <div style="font-size:11px;color:#c62828;margin-top:4px;">${s.flags.join('<br>')}</div>
+        ${s.status === 'flagged' || s.needs_amount ? `
+          ${s.flags.length ? `<div style="font-size:11px;color:#c62828;margin-top:4px;">${s.flags.join('<br>')}</div>` : ''}
+          ${s.needs_amount && s.status !== 'flagged' ? `<div style="font-size:11px;color:#e65100;margin-top:4px;">⚠ Amount not detected — enter manually</div>` : ''}
           <form method="POST" action="/admin/approve/${s.id}" style="margin:6px 0 4px;">
-            <input name="manual_amount" type="number" step="0.01" placeholder="Enter amount (OMR)" value="${s.amount || ''}" style="width:100%;padding:5px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;margin-bottom:4px;">
+            <input name="manual_amount" type="number" step="0.01" placeholder="Enter amount (OMR)" value="${s.amount || ''}" style="width:100%;padding:5px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;margin-bottom:4px;" ${s.amount ? '' : 'required'}>
             <div style="display:flex;gap:6px;">
               <button class="act-btn ok-btn" type="submit">✓ Approve</button>
               <a href="/receipt/${s.id}" target="_blank" class="act-btn" style="background:#e8f0fe;color:#1a73e8;text-decoration:none;padding:4px 10px;border-radius:6px;font-size:12px;">👁 View</a>
             </div>
           </form>
-          <form method="POST" action="/admin/reject/${s.id}" style="margin:0;">
-            <button class="act-btn rej-btn">✗ Reject</button>
-          </form>` : 
+          ${s.status === 'flagged' ? `<form method="POST" action="/admin/reject/${s.id}" style="margin:0;"><button class="act-btn rej-btn">✗ Reject</button></form>` : ''}` :
           s.image_b64 ? `<div style="margin-top:4px;"><a href="/receipt/${s.id}" target="_blank" style="font-size:11px;color:#1a73e8;">View receipt</a></div>` : ''}
       </td>
     </tr>`).join('');
