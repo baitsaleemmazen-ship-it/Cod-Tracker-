@@ -66,33 +66,92 @@ function getTodayIds() {
 }
 
 // ─── Google Sheets helper ─────────────────────────────────────────────────────
-async function appendToSheet(row) {
-  try {
-    const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
-    const auth = new google.auth.GoogleAuth({
-      credentials: creds,
-      scopes: ['https://www.googleapis.com/auth/spreadsheets']
-    });
-    const sheets = google.sheets({ version: 'v4', auth });
-    const spreadsheetId = process.env.SHEET_ID;
+async function getSheetAuth() {
+  const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+  const auth = new google.auth.GoogleAuth({
+    credentials: creds,
+    scopes: ['https://www.googleapis.com/auth/spreadsheets']
+  });
+  return { auth, sheets: google.sheets({ version: 'v4', auth }), spreadsheetId: process.env.SHEET_ID };
+}
 
-    // Ensure header row exists
-    const existing = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Sheet1!A1:E1' });
-    if (!existing.data.values || !existing.data.values.length) {
+async function ensureDailySheet(date) {
+  // date format: DD-MM-YYYY
+  const parts = date.split('-'); // YYYY-MM-DD
+  const sheetName = `${parts[2]}-${parts[1]}-${parts[0]}`; // DD-MM-YYYY
+  try {
+    const { sheets, spreadsheetId } = await getSheetAuth();
+
+    // Get existing sheets
+    const meta = await sheets.spreadsheets.get({ spreadsheetId });
+    const existing = meta.data.sheets.map(s => s.properties.title);
+
+    if (!existing.includes(sheetName)) {
+      // Create new sheet tab
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: { requests: [{ addSheet: { properties: { title: sheetName } } }] }
+      });
+
+      // Pre-populate header + all riders in order
+      const header = [['Rider Name', 'Rider ID', 'Amount (OMR)', 'Bank', 'Date', 'Time']];
+      const riderRows = riders.map(r => [r.name, r.id, '', '', '', '']);
       await sheets.spreadsheets.values.update({
-        spreadsheetId, range: 'Sheet1!A1',
+        spreadsheetId,
+        range: `${sheetName}!A1`,
         valueInputOption: 'RAW',
-        requestBody: { values: [['Date', 'Rider Name', 'Rider ID', 'Amount (OMR)', 'Bank']] }
+        requestBody: { values: [...header, ...riderRows] }
       });
     }
-    await sheets.spreadsheets.values.append({
-      spreadsheetId, range: 'Sheet1!A:E',
-      valueInputOption: 'RAW',
-      requestBody: { values: [row] }
+    return sheetName;
+  } catch (e) {
+    console.error('ensureDailySheet error:', e.message);
+    return null;
+  }
+}
+
+async function fillRiderRow(submission) {
+  try {
+    const { sheets, spreadsheetId } = await getSheetAuth();
+    const sheetName = await ensureDailySheet(submission.date);
+    if (!sheetName) return false;
+
+    // Get all rows to find rider's row
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `${sheetName}!A:B`
     });
+    const rows = res.data.values || [];
+
+    // Find rider row by ID (column B)
+    let rowIndex = -1;
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i] && rows[i][1] === submission.rider_id) {
+        rowIndex = i + 1; // 1-indexed for Sheets API
+        break;
+      }
+    }
+
+    if (rowIndex === -1) {
+      // Rider not in sheet — append at end
+      await sheets.spreadsheets.values.append({
+        spreadsheetId,
+        range: `${sheetName}!A:F`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [[submission.rider_name, submission.rider_id, submission.amount || '', submission.bank || '', submission.date, new Date(submission.submitted_at).toLocaleTimeString()]] }
+      });
+    } else {
+      // Fill in the rider's pre-existing row
+      await sheets.spreadsheets.values.update({
+        spreadsheetId,
+        range: `${sheetName}!C${rowIndex}:F${rowIndex}`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [[submission.amount || '', submission.bank || '', submission.date, new Date(submission.submitted_at).toLocaleTimeString()]] }
+      });
+    }
     return true;
   } catch (e) {
-    console.error('Sheet error:', e.message);
+    console.error('fillRiderRow error:', e.message);
     return false;
   }
 }
@@ -291,7 +350,7 @@ Return ONLY this JSON, no markdown, no explanation:
 
     // Auto-write to sheet if approved and amount known
     if (status === 'approved' && aiResult.amount) {
-      await appendToSheet([submission.date, submission.rider_name, submission.rider_id, submission.amount, submission.bank]);
+      await fillRiderRow(submission);
     }
 
     res.json({ ok: true });
@@ -457,7 +516,7 @@ app.post('/admin/approve/:id', requireAdmin, async (req, res) => {
     }
     sub.bank = sub.bank || 'Bank';
     saveSubmissions();
-    await appendToSheet([sub.date, sub.rider_name, sub.rider_id, sub.amount || '', sub.bank]);
+    await fillRiderRow(sub);
   }
   res.redirect('/admin');
 });
