@@ -261,12 +261,14 @@ app.post('/submit', upload.single('receipt'), async (req, res) => {
       rider_name: rider.name,
       amount: aiResult.amount || null,
       currency: aiResult.currency || 'OMR',
-      bank: aiResult.bank_name || '—',
+      bank: aiResult.bank_name || null,
       date: today,
       submitted_at: new Date().toISOString(),
       status,
       flags,
-      detected_id: aiResult.detected_id || null
+      detected_id: aiResult.detected_id || null,
+      image_b64: b64,
+      image_type: mediaType
     };
 
     submissions.push(submission);
@@ -282,6 +284,15 @@ app.post('/submit', upload.single('receipt'), async (req, res) => {
     console.error(e);
     res.json({ ok: false, error: 'Server error.' });
   }
+});
+
+// ─── Receipt image endpoint ───────────────────────────────────────────────────
+app.get('/receipt/:id', requireAdmin, (req, res) => {
+  const sub = submissions.find(s => s.id === req.params.id);
+  if (!sub || !sub.image_b64) return res.status(404).send('Not found');
+  const buf = Buffer.from(sub.image_b64, 'base64');
+  res.setHeader('Content-Type', sub.image_type || 'image/jpeg');
+  res.send(buf);
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -334,10 +345,12 @@ app.get('/admin', requireAdmin, (req, res) => {
 
   const rows = todaySubs.sort((a, b) => b.submitted_at.localeCompare(a.submitted_at)).map(s => `
     <tr>
-      <td>${s.rider_name}</td>
-      <td>${s.rider_id}</td>
-      <td style="font-weight:600;">${s.amount ? s.amount.toLocaleString() + ' ' + s.currency : '—'}</td>
-      <td>${s.bank}</td>
+      <td>
+        ${s.image_b64 ? `<a href="/receipt/${s.id}" target="_blank"><img src="/receipt/${s.id}" style="width:56px;height:56px;object-fit:cover;border-radius:8px;border:1px solid #eee;display:block;" alt="receipt"></a>` : '<div style="width:56px;height:56px;background:#f5f5f5;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px;">📄</div>'}
+      </td>
+      <td style="font-weight:500;">${s.rider_name}</td>
+      <td style="color:#888;">${s.rider_id}</td>
+      <td style="font-weight:600;">${s.amount ? s.amount.toLocaleString() + ' OMR' : '<span style="color:#c62828;">Not detected</span>'}</td>
       <td>${new Date(s.submitted_at).toLocaleTimeString()}</td>
       <td>
         <span class="badge ${s.status === 'approved' ? 'ok' : s.status === 'flagged' ? 'flagged' : 'rej'}">
@@ -345,10 +358,17 @@ app.get('/admin', requireAdmin, (req, res) => {
         </span>
         ${s.status === 'flagged' ? `
           <div style="font-size:11px;color:#c62828;margin-top:4px;">${s.flags.join('<br>')}</div>
-          <div style="display:flex;gap:6px;margin-top:6px;">
-            <form method="POST" action="/admin/approve/${s.id}" style="margin:0;"><button class="act-btn ok-btn">Approve</button></form>
-            <form method="POST" action="/admin/reject/${s.id}" style="margin:0;"><button class="act-btn rej-btn">Reject</button></form>
-          </div>` : ''}
+          <form method="POST" action="/admin/approve/${s.id}" style="margin:6px 0 4px;">
+            <input name="manual_amount" type="number" step="0.01" placeholder="Enter amount (OMR)" value="${s.amount || ''}" style="width:100%;padding:5px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;margin-bottom:4px;">
+            <div style="display:flex;gap:6px;">
+              <button class="act-btn ok-btn" type="submit">✓ Approve</button>
+              <a href="/receipt/${s.id}" target="_blank" class="act-btn" style="background:#e8f0fe;color:#1a73e8;text-decoration:none;padding:4px 10px;border-radius:6px;font-size:12px;">👁 View</a>
+            </div>
+          </form>
+          <form method="POST" action="/admin/reject/${s.id}" style="margin:0;">
+            <button class="act-btn rej-btn">✗ Reject</button>
+          </form>` : 
+          s.image_b64 ? `<div style="margin-top:4px;"><a href="/receipt/${s.id}" target="_blank" style="font-size:11px;color:#1a73e8;">View receipt</a></div>` : ''}
       </td>
     </tr>`).join('');
 
@@ -399,7 +419,7 @@ app.get('/admin', requireAdmin, (req, res) => {
     <div class="stat"><div class="stat-val" style="font-size:18px;padding-top:4px;">${totalAmt.toLocaleString(undefined,{maximumFractionDigits:2})} OMR</div><div class="stat-lbl">Total COD approved</div></div>
   </div>
   <table>
-    <thead><tr><th>Rider</th><th>ID</th><th>Amount</th><th>Bank</th><th>Time</th><th>Status</th></tr></thead>
+    <thead><tr><th>Receipt</th><th>Rider</th><th>ID</th><th>Amount</th><th>Time</th><th>Status</th></tr></thead>
     <tbody>${rows || '<tr><td colspan="6" class="empty">No submissions yet today.</td></tr>'}</tbody>
   </table>
 </div>
@@ -411,8 +431,15 @@ app.post('/admin/approve/:id', requireAdmin, async (req, res) => {
   const sub = submissions.find(s => s.id === req.params.id);
   if (sub) {
     sub.status = 'approved';
+    // Use manually entered amount if AI didn't detect it
+    if (req.body.manual_amount && !sub.amount) {
+      sub.amount = parseFloat(req.body.manual_amount);
+    } else if (req.body.manual_amount) {
+      sub.amount = parseFloat(req.body.manual_amount);
+    }
+    sub.bank = sub.bank || 'Bank';
     saveSubmissions();
-    await appendToSheet([sub.date, sub.rider_name, sub.rider_id, sub.amount, sub.bank]);
+    await appendToSheet([sub.date, sub.rider_name, sub.rider_id, sub.amount || '', sub.bank]);
   }
   res.redirect('/admin');
 });
