@@ -229,20 +229,22 @@ app.post('/submit', upload.single('receipt'), async (req, res) => {
           role: 'user',
           content: [
             { type: 'image', source: { type: 'base64', media_type: mediaType, data: b64 } },
-            { type: 'text', text: `This is a bank payment receipt from Oman. Extract the following information carefully.
+            { type: 'text', text: `This is a bank transfer receipt screenshot from Oman. Extract information carefully.
 
-The AMOUNT is the total money transferred/paid. Look for labels like: Amount, Total, مبلغ, الإجمالي, Payment Amount, Transfer Amount, Paid Amount, Net Amount. It is usually the largest number on the receipt.
+Key fields to find:
+- AMOUNT: Look for "Amount:" field — it shows like "OMR 11.960" or "OMR 45.500". Extract just the number.
+- RIDER ID: Look in "Remarks:" field for "id XXXXXX" (6-7 digit number). Also check any ID fields.
+- DATE: Look for "Transaction Date" or similar.
+- BANK: Look for "Beneficiary Bank:" field.
 
-The ID number is a 6-7 digit employee/rider ID number.
-
-Return ONLY this JSON with no extra text:
+Return ONLY this JSON, no extra text:
 {
-  "amount": <the payment amount as a number, e.g. 45.500, or null if truly not visible>,
+  "amount": <number only, e.g. 11.960, or null if not found>,
   "currency": "OMR",
   "date": "<YYYY-MM-DD or null>",
-  "detected_id": "<6-7 digit ID number visible on receipt or null>",
+  "detected_id": "<6-7 digit ID from Remarks or null>",
   "bank_name": "<bank name or null>",
-  "is_legit_receipt": <true if this looks like a real bank/payment receipt, false if it's a photo of something else>
+  "is_legit_receipt": <true if this is a real bank transfer receipt, false otherwise>
 }` }
           ]
         }]
