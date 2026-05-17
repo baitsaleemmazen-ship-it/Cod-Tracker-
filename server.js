@@ -9,6 +9,7 @@ const path = require('path');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+const uploadBoth = upload.fields([{ name: 'receipt', maxCount: 1 }, { name: 'talabat', maxCount: 1 }]);
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 app.use(express.json());
@@ -94,8 +95,8 @@ async function ensureDailySheet(date) {
       });
 
       // Pre-populate header + all riders in order
-      const header = [['Rider Name', 'Rider ID', 'Amount (OMR)', 'Bank', 'Date', 'Time']];
-      const riderRows = riders.map(r => [r.name, r.id, '', '', '', '']);
+      const header = [['Rider Name', 'Rider ID', 'Bank Amount (OMR)', 'Talabat Collected (OMR)', 'Bank', 'Date', 'Time']];
+      const riderRows = riders.map(r => [r.name, r.id, '', '', '', '', '']);
       await sheets.spreadsheets.values.update({
         spreadsheetId,
         range: `${sheetName}!A1`,
@@ -136,17 +137,17 @@ async function fillRiderRow(submission) {
       // Rider not in sheet — append at end
       await sheets.spreadsheets.values.append({
         spreadsheetId,
-        range: `${sheetName}!A:F`,
+        range: `${sheetName}!A:G`,
         valueInputOption: 'RAW',
-        requestBody: { values: [[submission.rider_name, submission.rider_id, submission.amount || '', submission.bank || '', submission.date, new Date(submission.submitted_at).toLocaleTimeString()]] }
+        requestBody: { values: [[submission.rider_name, submission.rider_id, submission.amount || '', submission.talabat_amount || '', submission.bank || '', submission.date, new Date(submission.submitted_at).toLocaleTimeString()]] }
       });
     } else {
       // Fill in the rider's pre-existing row
       await sheets.spreadsheets.values.update({
         spreadsheetId,
-        range: `${sheetName}!C${rowIndex}:F${rowIndex}`,
+        range: `${sheetName}!C${rowIndex}:G${rowIndex}`,
         valueInputOption: 'RAW',
-        requestBody: { values: [[submission.amount || '', submission.bank || '', submission.date, new Date(submission.submitted_at).toLocaleTimeString()]] }
+        requestBody: { values: [[submission.amount || '', submission.talabat_amount || '', submission.bank || '', submission.date, new Date(submission.submitted_at).toLocaleTimeString()]] }
       });
     }
     return true;
@@ -175,13 +176,18 @@ app.get('/', (req, res) => {
   .card{background:#fff;border-radius:16px;padding:1.5rem;width:100%;max-width:420px;box-shadow:0 2px 16px rgba(0,0,0,0.08);}
   h1{font-size:20px;font-weight:600;margin-bottom:4px;}
   .sub{font-size:13px;color:#888;margin-bottom:1.5rem;}
-  label{font-size:13px;font-weight:500;color:#444;display:block;margin-bottom:4px;}
-  select,input{width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:10px;font-size:14px;margin-bottom:1rem;background:#fafafa;}
-  .upload-zone{border:2px dashed #ddd;border-radius:12px;padding:2rem;text-align:center;cursor:pointer;margin-bottom:1rem;transition:background 0.15s;}
-  .upload-zone:hover{background:#f9f9f9;}
-  .upload-zone input{display:none;}
-  .preview{max-width:100%;max-height:180px;border-radius:8px;margin:0.5rem auto;display:block;}
-  button{width:100%;padding:12px;background:#1a73e8;color:#fff;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;}
+  label{font-size:13px;font-weight:500;color:#444;display:block;margin-bottom:6px;}
+  .section{background:#f9f9f9;border-radius:12px;padding:1rem;margin-bottom:1rem;border:1px solid #eee;}
+  .section-title{font-size:14px;font-weight:600;margin-bottom:8px;}
+  select{width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:10px;font-size:14px;margin-bottom:1rem;background:#fafafa;}
+  .btn-row{display:flex;gap:8px;margin-bottom:8px;}
+  .btn-cam{flex:1;padding:12px;background:#1a73e8;color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;}
+  .btn-gal{flex:1;padding:12px;background:#fff;color:#1a73e8;border:2px solid #1a73e8;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;}
+  .preview-wrap{display:none;text-align:center;margin-top:6px;}
+  .preview-wrap img{max-width:100%;max-height:140px;border-radius:8px;}
+  .preview-wrap p{font-size:11px;color:#888;margin-top:4px;}
+  .checked{font-size:11px;color:#1e7e34;margin-top:4px;}
+  button[type=submit]{width:100%;padding:14px;background:#1a73e8;color:#fff;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;margin-top:0.5rem;}
   button:disabled{background:#aaa;}
   .msg{padding:12px;border-radius:10px;font-size:13px;text-align:center;margin-top:1rem;}
   .msg.ok{background:#e6f4ea;color:#1e7e34;}
@@ -190,60 +196,82 @@ app.get('/', (req, res) => {
 </style></head><body>
 <div class="card">
   <h1>📦 COD Receipt</h1>
-  <p class="sub">Submit your daily bank receipt below</p>
-  <form id="form" enctype="multipart/form-data">
+  <p class="sub">Submit your daily bank receipt and Talabat screenshot</p>
+  <form id="form">
     <label>Your name</label>
     <select name="rider_id" required id="riderSel">
       <option value="">— select your name —</option>
       ${riders.map(r => `<option value="${r.id}">${r.name}</option>`).join('')}
     </select>
-    <label>Bank receipt photo</label>
-    <input type="file" id="imgInput" name="receipt" accept="image/*" onchange="previewFile(this)" style="display:none">
-    <input type="file" id="imgCamera" name="receipt" accept="image/*" capture="environment" onchange="previewFile(this)" style="display:none">
-    <div style="display:flex;gap:8px;margin-bottom:1rem;">
-      <button type="button" onclick="document.getElementById('imgCamera').click()" style="flex:1;padding:14px;background:#1a73e8;color:#fff;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;">📷 Take Photo</button>
-      <button type="button" onclick="document.getElementById('imgInput').click()" style="flex:1;padding:14px;background:#fff;color:#1a73e8;border:2px solid #1a73e8;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;">🖼 Gallery</button>
+
+    <div class="section">
+      <div class="section-title">🏦 Bank Receipt</div>
+      <input type="file" id="bankInput" accept="image/*" onchange="previewFile(this,'bankPreview','bankName')" style="display:none">
+      <input type="file" id="bankCamera" accept="image/*" capture="environment" onchange="previewFile(this,'bankPreview','bankName')" style="display:none">
+      <div class="btn-row">
+        <button type="button" class="btn-cam" onclick="document.getElementById('bankCamera').click()">📷 Take Photo</button>
+        <button type="button" class="btn-gal" onclick="document.getElementById('bankInput').click()">🖼 Gallery</button>
+      </div>
+      <div class="preview-wrap" id="bankPreview">
+        <img id="bankImg" alt="bank receipt preview">
+        <p id="bankName"></p>
+      </div>
     </div>
-    <div id="imgPreviewWrap" style="display:none;text-align:center;margin-bottom:1rem;">
-      <img id="imgPreview" class="preview" style="max-width:100%;max-height:180px;border-radius:8px;" alt="preview">
-      <p style="font-size:12px;color:#888;margin-top:4px;" id="imgName"></p>
+
+    <div class="section">
+      <div class="section-title">🛵 Talabat Screenshot</div>
+      <input type="file" id="talabatInput" accept="image/*" onchange="previewFile(this,'talabatPreview','talabatName')" style="display:none">
+      <input type="file" id="talabatCamera" accept="image/*" capture="environment" onchange="previewFile(this,'talabatPreview','talabatName')" style="display:none">
+      <div class="btn-row">
+        <button type="button" class="btn-cam" onclick="document.getElementById('talabatCamera').click()">📷 Take Photo</button>
+        <button type="button" class="btn-gal" onclick="document.getElementById('talabatInput').click()">🖼 Gallery</button>
+      </div>
+      <div class="preview-wrap" id="talabatPreview">
+        <img id="talabatImg" alt="talabat preview">
+        <p id="talabatName"></p>
+      </div>
     </div>
+
     <button type="submit" id="submitBtn">Submit Receipt</button>
   </form>
-  <div class="spinner" id="spinner">⏳ Reading your receipt...</div>
+  <div class="spinner" id="spinner">⏳ Reading your receipts...</div>
   <div id="msg"></div>
 </div>
 <script>
-function previewFile(input) {
+function previewFile(input, wrapId, nameId) {
   const file = input.files[0];
   if (!file) return;
+  const imgId = wrapId === 'bankPreview' ? 'bankImg' : 'talabatImg';
   const reader = new FileReader();
   reader.onload = e => {
-    document.getElementById('imgPreview').src = e.target.result;
-    document.getElementById('imgPreview').style.display = 'block';
-    document.getElementById('uploadHint').style.display = 'none';
+    document.getElementById(imgId).src = e.target.result;
+    document.getElementById(wrapId).style.display = 'block';
+    document.getElementById(nameId).textContent = '✓ ' + file.name;
   };
   reader.readAsDataURL(file);
 }
 document.getElementById('form').onsubmit = async e => {
   e.preventDefault();
   const riderId = document.getElementById('riderSel').value;
-  const file = window._selectedFile || document.getElementById('imgInput').files[0] || document.getElementById('imgCamera').files[0];
+  const bankFile = document.getElementById('bankInput').files[0] || document.getElementById('bankCamera').files[0];
+  const talabatFile = document.getElementById('talabatInput').files[0] || document.getElementById('talabatCamera').files[0];
   if (!riderId) { showMsg('Please select your name.', 'err'); return; }
-  if (!file) { showMsg('Please take a photo or choose from gallery.', 'err'); return; }
+  if (!bankFile) { showMsg('Please upload your bank receipt.', 'err'); return; }
+  if (!talabatFile) { showMsg('Please upload your Talabat screenshot.', 'err'); return; }
   document.getElementById('submitBtn').disabled = true;
   document.getElementById('spinner').style.display = 'block';
   document.getElementById('msg').innerHTML = '';
   const fd = new FormData();
   fd.append('rider_id', riderId);
-  fd.append('receipt', file);
+  fd.append('receipt', bankFile);
+  fd.append('talabat', talabatFile);
   try {
     const res = await fetch('/submit', { method: 'POST', body: fd });
     const data = await res.json();
     document.getElementById('spinner').style.display = 'none';
     if (data.ok) {
       document.getElementById('form').style.display = 'none';
-      showMsg('✅ Receipt submitted successfully! Thank you.', 'ok');
+      showMsg('✅ Submitted successfully! Thank you.', 'ok');
     } else {
       showMsg('❌ ' + (data.error || 'Error. Please try again.'), 'err');
       document.getElementById('submitBtn').disabled = false;
@@ -262,23 +290,23 @@ function showMsg(text, type) {
 });
 
 // ─── Submit endpoint ──────────────────────────────────────────────────────────
-app.post('/submit', upload.single('receipt'), async (req, res) => {
+app.post('/submit', uploadBoth, async (req, res) => {
   try {
     const { rider_id } = req.body;
     const rider = riders.find(r => r.id === rider_id);
     if (!rider) return res.json({ ok: false, error: 'Rider not found.' });
-    if (!req.file) return res.json({ ok: false, error: 'No image uploaded.' });
+    const bankFile = req.files && req.files['receipt'] && req.files['receipt'][0];
+    const talabatFile = req.files && req.files['talabat'] && req.files['talabat'][0];
+    if (!bankFile) return res.json({ ok: false, error: 'No bank receipt uploaded.' });
+    if (!talabatFile) return res.json({ ok: false, error: 'No Talabat screenshot uploaded.' });
 
     const today = new Date().toISOString().slice(0, 10);
     const todayIds = getTodayIds();
-
-    // Check duplicate
     const isDuplicate = todayIds.has(rider_id);
 
-    // AI analysis
-    const b64 = req.file.buffer.toString('base64');
-    const mediaType = req.file.mimetype || 'image/jpeg';
-
+    // AI analysis — bank receipt
+    const bankB64 = bankFile.buffer.toString('base64');
+    const bankMediaType = bankFile.mimetype || 'image/jpeg';
     let aiResult = {};
     try {
       const response = await anthropic.messages.create({
@@ -287,17 +315,18 @@ app.post('/submit', upload.single('receipt'), async (req, res) => {
         messages: [{
           role: 'user',
           content: [
-            { type: 'image', source: { type: 'base64', media_type: mediaType, data: b64 } },
+            { type: 'image', source: { type: 'base64', media_type: bankMediaType, data: bankB64 } },
             { type: 'text', text: `This is a Bank Muscat (or similar Omani bank) transfer receipt. It has a decorative swirl/wave background pattern — ignore the background and read only the text fields.
 
 Extract these specific fields:
 - "Amount:" field → shows like "OMR  11.220" or "OMR  45.500" → extract the number only (e.g. 11.220)
+- "Debit Account Name:" field → the name of the person who sent the money (e.g. "GHAYOOR AHMED SHAFIQ")
 - "Remarks:" field → contains the rider ID like "Sal 16 may 2026 id 1397838" → extract the 7-digit number after "id "
 - "Transaction Date and Time:" field → extract the date part
 - "Beneficiary Bank:" field → extract bank name
 
 Return ONLY this JSON, no markdown, no explanation:
-{"amount":<number e.g. 11.220>,"currency":"OMR","date":"<YYYY-MM-DD>","detected_id":"<7-digit id from Remarks>","bank_name":"<bank name>","is_legit_receipt":true}` }
+{"amount":<number e.g. 11.220>,"currency":"OMR","date":"<YYYY-MM-DD>","detected_id":"<7-digit id from Remarks or not_found>","account_name":"<full name from Debit Account Name field or null>","bank_name":"<bank name>","is_legit_receipt":true}` }
           ]
         }]
       });
@@ -309,12 +338,56 @@ Return ONLY this JSON, no markdown, no explanation:
       console.error('AI error:', e.message);
     }
 
+    // AI analysis — Talabat screenshot
+    const talabatB64 = talabatFile.buffer.toString('base64');
+    const talabatMediaType = talabatFile.mimetype || 'image/jpeg';
+    let talabatResult = {};
+    try {
+      const tRes = await anthropic.messages.create({
+        model: 'claude-sonnet-4-5',
+        max_tokens: 300,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: talabatMediaType, data: talabatB64 } },
+            { type: 'text', text: `This is a Talabat delivery app screenshot showing a rider's delivery history and collected cash summary.
+
+Extract:
+- "Collected" amount (total cash collected from deliveries) — shows like "55.90 OMR" or similar
+- Number of deliveries if visible
+- Date shown if visible
+
+Return ONLY this JSON, no markdown:
+{"collected_amount":<number e.g. 55.90 or null>,"deliveries":<number or null>,"date":"<YYYY-MM-DD or null>"}` }
+          ]
+        }]
+      });
+      const tRaw = tRes.content.map(c => c.text || '').join('').replace(/```json|```/g, '').trim();
+      console.log('Talabat AI response:', tRaw);
+      talabatResult = JSON.parse(tRaw);
+    } catch (e) {
+      console.error('Talabat AI error:', e.message);
+    }
+
     // Fraud checks — only flag for real fraud, not AI reading issues
     const flags = [];
     let status = 'approved';
 
+    // Name mismatch: account name on receipt doesn't match rider name
+    if (aiResult.account_name) {
+      const accountName = aiResult.account_name.toLowerCase().replace(/\s+/g, ' ').trim();
+      const riderName = rider.name.toLowerCase().replace(/\s+/g, ' ').trim();
+      // Check if any word of rider name appears in account name
+      const riderWords = riderName.split(' ').filter(w => w.length > 2);
+      const nameMatch = riderWords.some(word => accountName.includes(word));
+      if (!nameMatch) {
+        flags.push(`Account name on receipt "${aiResult.account_name}" doesn't match rider name "${rider.name}"`);
+        status = 'flagged';
+      }
+    }
+
     // Real fraud: ID on receipt doesn't match the rider who submitted
-    if (aiResult.detected_id && aiResult.detected_id !== rider_id && riderMap && !Object.values(riderMap || {}).includes(aiResult.detected_id)) {
+    if (aiResult.detected_id && aiResult.detected_id !== 'not_found' && aiResult.detected_id !== rider_id) {
       flags.push(`ID on receipt (${aiResult.detected_id}) doesn't match rider ID (${rider_id})`);
       status = 'flagged';
     }
@@ -340,9 +413,15 @@ Return ONLY this JSON, no markdown, no explanation:
       status,
       flags,
       needs_amount: needsAmount,
-      detected_id: aiResult.detected_id || null,
-      image_b64: b64,
-      image_type: mediaType
+      talabat_amount: talabatResult.collected_amount || null,
+      talabat_deliveries: talabatResult.deliveries || null,
+      image_b64: bankB64,
+      image_type: bankMediaType,
+      account_name: aiResult.account_name || null,
+      talabat_amount: talabatResult.collected_amount || null,
+      talabat_deliveries: talabatResult.deliveries || null,
+      talabat_b64: talabatB64,
+      talabat_type: talabatMediaType,
     };
 
     submissions.push(submission);
@@ -369,8 +448,15 @@ app.get('/receipt/:id', requireAdmin, (req, res) => {
   res.send(buf);
 });
 
-// ══════════════════════════════════════════════════════════════════════════════
-// ADMIN — login
+app.get('/talabat/:id', requireAdmin, (req, res) => {
+  const sub = submissions.find(s => s.id === req.params.id);
+  if (!sub || !sub.talabat_b64) return res.status(404).send('Not found');
+  const buf = Buffer.from(sub.talabat_b64, 'base64');
+  res.setHeader('Content-Type', sub.talabat_type || 'image/jpeg');
+  res.send(buf);
+});
+
+
 // ══════════════════════════════════════════════════════════════════════════════
 app.get('/admin/login', (req, res) => {
   res.send(`<!DOCTYPE html><html><head>
@@ -425,6 +511,7 @@ app.get('/admin', requireAdmin, (req, res) => {
       <td style="font-weight:500;">${s.rider_name}</td>
       <td style="color:#888;">${s.rider_id}</td>
       <td style="font-weight:600;">${s.amount ? s.amount.toLocaleString() + ' OMR' : '<span style="color:#c62828;">Not detected</span>'}</td>
+      <td style="font-weight:600;color:#e65100;">${s.talabat_amount ? s.talabat_amount.toLocaleString() + ' OMR' : '—'}</td>
       <td>${new Date(s.submitted_at).toLocaleTimeString()}</td>
       <td>
         <span class="badge ${s.status === 'approved' ? 'ok' : s.status === 'flagged' ? 'flagged' : 'rej'}">
@@ -432,18 +519,21 @@ app.get('/admin', requireAdmin, (req, res) => {
         </span>
           ${s.status === 'flagged' || s.needs_amount ? `
           ${s.flags.length ? `<div style="font-size:11px;color:#c62828;margin-top:4px;">${s.flags.join('<br>')}</div>` : ''}
+          ${s.account_name ? `<div style="font-size:11px;color:#888;margin-top:3px;">Account: ${s.account_name}</div>` : ''}
           ${s.needs_amount && s.status !== 'flagged' ? `<div style="font-size:11px;color:#e65100;margin-top:4px;">⚠ Amount not detected — enter manually</div>` : ''}
           <form method="POST" action="/admin/approve/${s.id}" style="margin:6px 0 4px;">
             <input name="manual_amount" type="number" step="0.01" placeholder="Enter amount (OMR)" value="${s.amount || ''}" style="width:100%;padding:5px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;margin-bottom:4px;" ${s.amount ? '' : 'required'}>
             <div style="display:flex;gap:6px;">
               <button class="act-btn ok-btn" type="submit">✓ Approve</button>
-              <a href="/receipt/${s.id}" target="_blank" class="act-btn" style="background:#e8f0fe;color:#1a73e8;text-decoration:none;padding:4px 10px;border-radius:6px;font-size:12px;">👁 View</a>
+              <a href="/receipt/${s.id}" target="_blank" class="act-btn" style="background:#e8f0fe;color:#1a73e8;text-decoration:none;padding:4px 10px;border-radius:6px;font-size:12px;">👁 Bank</a>
+              ${s.talabat_b64 ? `<a href="/talabat/${s.id}" target="_blank" class="act-btn" style="background:#fff3e0;color:#e65100;text-decoration:none;padding:4px 10px;border-radius:6px;font-size:12px;">🛵 Talabat</a>` : ''}
             </div>
           </form>
           ${s.status === 'flagged' ? `<form method="POST" action="/admin/reject/${s.id}" style="margin:0 0 4px;"><button class="act-btn rej-btn">✗ Reject</button></form>` : ''}
           <form method="POST" action="/admin/delete/${s.id}" onsubmit="return confirm('Delete this submission?')" style="margin:0;"><button class="act-btn" style="background:#f5f5f5;color:#888;font-size:11px;">🗑 Delete</button></form>` :
-          `<div style="margin-top:4px;display:flex;gap:6px;align-items:center;">
-            ${s.image_b64 ? `<a href="/receipt/${s.id}" target="_blank" style="font-size:11px;color:#1a73e8;">View receipt</a>` : ''}
+          `<div style="margin-top:4px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+            ${s.image_b64 ? `<a href="/receipt/${s.id}" target="_blank" style="font-size:11px;color:#1a73e8;">👁 Bank receipt</a>` : ''}
+            ${s.talabat_b64 ? `<a href="/talabat/${s.id}" target="_blank" style="font-size:11px;color:#e65100;">🛵 Talabat</a>` : ''}
             <form method="POST" action="/admin/delete/${s.id}" onsubmit="return confirm('Delete this submission?')" style="margin:0;"><button class="act-btn" style="background:#f5f5f5;color:#888;font-size:11px;">🗑 Delete</button></form>
           </div>`}
       </td>
@@ -496,7 +586,7 @@ app.get('/admin', requireAdmin, (req, res) => {
     <div class="stat"><div class="stat-val" style="font-size:18px;padding-top:4px;">${totalAmt.toLocaleString(undefined,{maximumFractionDigits:2})} OMR</div><div class="stat-lbl">Total COD approved</div></div>
   </div>
   <table>
-    <thead><tr><th>Receipt</th><th>Rider</th><th>ID</th><th>Amount</th><th>Time</th><th>Status</th></tr></thead>
+    <thead><tr><th>Receipt</th><th>Rider</th><th>ID</th><th>Bank Amount</th><th>Talabat</th><th>Time</th><th>Status</th></tr></thead>
     <tbody>${rows || '<tr><td colspan="6" class="empty">No submissions yet today.</td></tr>'}</tbody>
   </table>
 </div>
