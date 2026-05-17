@@ -229,23 +229,16 @@ app.post('/submit', upload.single('receipt'), async (req, res) => {
           role: 'user',
           content: [
             { type: 'image', source: { type: 'base64', media_type: mediaType, data: b64 } },
-            { type: 'text', text: `This is a bank transfer receipt screenshot from Oman. Extract information carefully.
+            { type: 'text', text: `This is a Bank Muscat (or similar Omani bank) transfer receipt. It has a decorative swirl/wave background pattern — ignore the background and read only the text fields.
 
-Key fields to find:
-- AMOUNT: Look for "Amount:" field — it shows like "OMR 11.960" or "OMR 45.500". Extract just the number.
-- RIDER ID: Look in "Remarks:" field for "id XXXXXX" (6-7 digit number). Also check any ID fields.
-- DATE: Look for "Transaction Date" or similar.
-- BANK: Look for "Beneficiary Bank:" field.
+Extract these specific fields:
+- "Amount:" field → shows like "OMR  11.220" or "OMR  45.500" → extract the number only (e.g. 11.220)
+- "Remarks:" field → contains the rider ID like "Sal 16 may 2026 id 1397838" → extract the 7-digit number after "id "
+- "Transaction Date and Time:" field → extract the date part
+- "Beneficiary Bank:" field → extract bank name
 
-Return ONLY this JSON, no extra text:
-{
-  "amount": <number only, e.g. 11.960, or null if not found>,
-  "currency": "OMR",
-  "date": "<YYYY-MM-DD or null>",
-  "detected_id": "<6-7 digit ID from Remarks or null>",
-  "bank_name": "<bank name or null>",
-  "is_legit_receipt": <true if this is a real bank transfer receipt, false otherwise>
-}` }
+Return ONLY this JSON, no markdown, no explanation:
+{"amount":<number e.g. 11.220>,"currency":"OMR","date":"<YYYY-MM-DD>","detected_id":"<7-digit id from Remarks>","bank_name":"<bank name>","is_legit_receipt":true}` }
           ]
         }]
       });
@@ -376,7 +369,7 @@ app.get('/admin', requireAdmin, (req, res) => {
         <span class="badge ${s.status === 'approved' ? 'ok' : s.status === 'flagged' ? 'flagged' : 'rej'}">
           ${s.status === 'approved' ? '✓ Approved' : s.status === 'flagged' ? '⚠ Flagged' : '✗ Rejected'}
         </span>
-        ${s.status === 'flagged' || s.needs_amount ? `
+          ${s.status === 'flagged' || s.needs_amount ? `
           ${s.flags.length ? `<div style="font-size:11px;color:#c62828;margin-top:4px;">${s.flags.join('<br>')}</div>` : ''}
           ${s.needs_amount && s.status !== 'flagged' ? `<div style="font-size:11px;color:#e65100;margin-top:4px;">⚠ Amount not detected — enter manually</div>` : ''}
           <form method="POST" action="/admin/approve/${s.id}" style="margin:6px 0 4px;">
@@ -386,8 +379,12 @@ app.get('/admin', requireAdmin, (req, res) => {
               <a href="/receipt/${s.id}" target="_blank" class="act-btn" style="background:#e8f0fe;color:#1a73e8;text-decoration:none;padding:4px 10px;border-radius:6px;font-size:12px;">👁 View</a>
             </div>
           </form>
-          ${s.status === 'flagged' ? `<form method="POST" action="/admin/reject/${s.id}" style="margin:0;"><button class="act-btn rej-btn">✗ Reject</button></form>` : ''}` :
-          s.image_b64 ? `<div style="margin-top:4px;"><a href="/receipt/${s.id}" target="_blank" style="font-size:11px;color:#1a73e8;">View receipt</a></div>` : ''}
+          ${s.status === 'flagged' ? `<form method="POST" action="/admin/reject/${s.id}" style="margin:0 0 4px;"><button class="act-btn rej-btn">✗ Reject</button></form>` : ''}
+          <form method="POST" action="/admin/delete/${s.id}" onsubmit="return confirm('Delete this submission?')" style="margin:0;"><button class="act-btn" style="background:#f5f5f5;color:#888;font-size:11px;">🗑 Delete</button></form>` :
+          `<div style="margin-top:4px;display:flex;gap:6px;align-items:center;">
+            ${s.image_b64 ? `<a href="/receipt/${s.id}" target="_blank" style="font-size:11px;color:#1a73e8;">View receipt</a>` : ''}
+            <form method="POST" action="/admin/delete/${s.id}" onsubmit="return confirm('Delete this submission?')" style="margin:0;"><button class="act-btn" style="background:#f5f5f5;color:#888;font-size:11px;">🗑 Delete</button></form>
+          </div>`}
       </td>
     </tr>`).join('');
 
@@ -463,7 +460,13 @@ app.post('/admin/approve/:id', requireAdmin, async (req, res) => {
   res.redirect('/admin');
 });
 
-app.post('/admin/reject/:id', requireAdmin, (req, res) => {
+app.post('/admin/delete/:id', requireAdmin, (req, res) => {
+  submissions = submissions.filter(s => s.id !== req.params.id);
+  saveSubmissions();
+  res.redirect('/admin');
+});
+
+
   const sub = submissions.find(s => s.id === req.params.id);
   if (sub) { sub.status = 'rejected'; saveSubmissions(); }
   res.redirect('/admin');
