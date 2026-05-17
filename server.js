@@ -139,10 +139,15 @@ app.get('/', (req, res) => {
       ${riders.map(r => `<option value="${r.id}">${r.name}</option>`).join('')}
     </select>
     <label>Bank receipt photo</label>
-    <div class="upload-zone" onclick="document.getElementById('imgInput').click()">
-      <input type="file" id="imgInput" name="receipt" accept="image/*" capture="environment" onchange="previewFile(this)">
-      <div id="uploadHint">📷 Tap to take photo or upload</div>
-      <img id="imgPreview" class="preview" style="display:none" alt="preview">
+    <input type="file" id="imgInput" name="receipt" accept="image/*" onchange="previewFile(this)" style="display:none">
+    <input type="file" id="imgCamera" name="receipt" accept="image/*" capture="environment" onchange="previewFile(this)" style="display:none">
+    <div style="display:flex;gap:8px;margin-bottom:1rem;">
+      <button type="button" onclick="document.getElementById('imgCamera').click()" style="flex:1;padding:14px;background:#1a73e8;color:#fff;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;">📷 Take Photo</button>
+      <button type="button" onclick="document.getElementById('imgInput').click()" style="flex:1;padding:14px;background:#fff;color:#1a73e8;border:2px solid #1a73e8;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;">🖼 Gallery</button>
+    </div>
+    <div id="imgPreviewWrap" style="display:none;text-align:center;margin-bottom:1rem;">
+      <img id="imgPreview" class="preview" style="max-width:100%;max-height:180px;border-radius:8px;" alt="preview">
+      <p style="font-size:12px;color:#888;margin-top:4px;" id="imgName"></p>
     </div>
     <button type="submit" id="submitBtn">Submit Receipt</button>
   </form>
@@ -164,9 +169,9 @@ function previewFile(input) {
 document.getElementById('form').onsubmit = async e => {
   e.preventDefault();
   const riderId = document.getElementById('riderSel').value;
-  const file = document.getElementById('imgInput').files[0];
+  const file = window._selectedFile || document.getElementById('imgInput').files[0] || document.getElementById('imgCamera').files[0];
   if (!riderId) { showMsg('Please select your name.', 'err'); return; }
-  if (!file) { showMsg('Please upload your receipt photo.', 'err'); return; }
+  if (!file) { showMsg('Please take a photo or choose from gallery.', 'err'); return; }
   document.getElementById('submitBtn').disabled = true;
   document.getElementById('spinner').style.display = 'block';
   document.getElementById('msg').innerHTML = '';
