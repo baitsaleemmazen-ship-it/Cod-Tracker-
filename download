@@ -1,0 +1,5 @@
+node_modules/
+.env
+submissions.json
+riders.json
+*.json.bak
