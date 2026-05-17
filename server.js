@@ -321,12 +321,13 @@ app.post('/submit', uploadBoth, async (req, res) => {
 Extract these specific fields:
 - "Amount:" field → shows like "OMR  11.220" or "OMR  45.500" → extract the number only (e.g. 11.220)
 - "Debit Account Name:" field → the name of the person who sent the money (e.g. "GHAYOOR AHMED SHAFIQ")
+- "Beneficiary Name:" field → the name of who received the money (e.g. "FUTURE WAVE TECHNOLOGIES")
 - "Remarks:" field → contains the rider ID like "Sal 16 may 2026 id 1397838" → extract the 7-digit number after "id "
 - "Transaction Date and Time:" field → extract the date part
 - "Beneficiary Bank:" field → extract bank name
 
 Return ONLY this JSON, no markdown, no explanation:
-{"amount":<number e.g. 11.220>,"currency":"OMR","date":"<YYYY-MM-DD>","detected_id":"<7-digit id from Remarks or not_found>","account_name":"<full name from Debit Account Name field or null>","bank_name":"<bank name>","is_legit_receipt":true}` }
+{"amount":<number e.g. 11.220>,"currency":"OMR","date":"<YYYY-MM-DD>","detected_id":"<7-digit id from Remarks or not_found>","account_name":"<full name from Debit Account Name field or null>","beneficiary_name":"<full beneficiary name or null>","bank_name":"<bank name>","is_legit_receipt":true}` }
           ]
         }]
       });
@@ -373,6 +374,18 @@ Return ONLY this JSON, no markdown:
     const flags = [];
     let status = 'approved';
 
+    // Beneficiary check — must be FUTURE WAVE TECHNOLOGIES
+    if (aiResult.beneficiary_name) {
+      const ben = aiResult.beneficiary_name.toUpperCase().trim();
+      if (!ben.includes('FUTURE WAVE')) {
+        flags.push(`Beneficiary is "${aiResult.beneficiary_name}" — not Future Wave Technologies`);
+        status = 'flagged';
+      }
+    } else {
+      flags.push('Beneficiary name not detected — please verify receipt');
+      status = 'flagged';
+    }
+
     // Name mismatch: account name on receipt doesn't match rider name
     if (aiResult.account_name) {
       const accountName = aiResult.account_name.toLowerCase().replace(/\s+/g, ' ').trim();
@@ -418,6 +431,7 @@ Return ONLY this JSON, no markdown:
       image_b64: bankB64,
       image_type: bankMediaType,
       account_name: aiResult.account_name || null,
+      beneficiary_name: aiResult.beneficiary_name || null,
       talabat_amount: talabatResult.collected_amount || null,
       talabat_deliveries: talabatResult.deliveries || null,
       talabat_b64: talabatB64,
@@ -519,7 +533,8 @@ app.get('/admin', requireAdmin, (req, res) => {
         </span>
           ${s.status === 'flagged' || s.needs_amount ? `
           ${s.flags.length ? `<div style="font-size:11px;color:#c62828;margin-top:4px;">${s.flags.join('<br>')}</div>` : ''}
-          ${s.account_name ? `<div style="font-size:11px;color:#888;margin-top:3px;">Account: ${s.account_name}</div>` : ''}
+          ${s.account_name ? `<div style="font-size:11px;color:#888;margin-top:3px;">Sender: ${s.account_name}</div>` : ''}
+          ${s.beneficiary_name ? `<div style="font-size:11px;color:#888;margin-top:2px;">Beneficiary: ${s.beneficiary_name}</div>` : ''}
           ${s.needs_amount && s.status !== 'flagged' ? `<div style="font-size:11px;color:#e65100;margin-top:4px;">⚠ Amount not detected — enter manually</div>` : ''}
           <form method="POST" action="/admin/approve/${s.id}" style="margin:6px 0 4px;">
             <input name="manual_amount" type="number" step="0.01" placeholder="Enter amount (OMR)" value="${s.amount || ''}" style="width:100%;padding:5px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;margin-bottom:4px;" ${s.amount ? '' : 'required'}>
