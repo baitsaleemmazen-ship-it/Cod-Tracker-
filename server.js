@@ -316,18 +316,20 @@ app.post('/submit', uploadBoth, async (req, res) => {
           role: 'user',
           content: [
             { type: 'image', source: { type: 'base64', media_type: bankMediaType, data: bankB64 } },
-            { type: 'text', text: `This is a Bank Muscat (or similar Omani bank) transfer receipt. It has a decorative swirl/wave background pattern — ignore the background and read only the text fields.
+            { type: 'text', text: `This is a bank transfer receipt from Oman, either in English or Arabic. It may have a decorative background pattern — ignore it and read only the text fields. Arabic numerals (٠١٢٣٤٥٦٧٨٩) must be converted to Western numerals (0123456789).
 
-Extract these specific fields:
-- "Amount:" field → shows like "OMR  11.220" or "OMR  45.500" → extract the number only (e.g. 11.220)
-- "Debit Account Name:" field → the name of the person who sent the money (e.g. "GHAYOOR AHMED SHAFIQ")
-- "Beneficiary Name:" field → the name of who received the money (e.g. "FUTURE WAVE TECHNOLOGIES")
-- "Remarks:" field → contains the rider ID like "Sal 16 may 2026 id 1397838" → extract the 7-digit number after "id "
-- "Transaction Date and Time:" field → extract the date part
-- "Beneficiary Bank:" field → extract bank name
+Extract these fields (check both English and Arabic labels):
+
+- Amount: look for "Amount" or "المبلغ" or "الإجمالي" → extract number only, convert Arabic numerals (e.g. ١١٫٢٢٠ = 11.220)
+- Sender name: "Debit Account Name" or "اسم الحساب المدين" or "اسم المرسل"
+- Beneficiary name: "Beneficiary Name" or "اسم المستفيد" → who received the money
+- Rider ID: in "Remarks" or "الملاحظات" or "البيان" → look for "id XXXXXXX" (6-7 digit number after "id "), convert Arabic numerals if needed
+- Date: "Transaction Date" or "تاريخ العملية" or "التاريخ", convert Arabic numerals if needed
+- Bank: "Beneficiary Bank" or "بنك المستفيد"
+- Transaction status: look for "Transaction Completed", "Processed Successfully", "تمت العملية بنجاح", "ناجح", "مكتمل" = successful. "Failed", "فشل", "Pending", "معلق", "Rejected", "مرفوض" = NOT successful.
 
 Return ONLY this JSON, no markdown, no explanation:
-{"amount":<number e.g. 11.220>,"currency":"OMR","date":"<YYYY-MM-DD>","detected_id":"<7-digit id from Remarks or not_found>","account_name":"<full name from Debit Account Name field or null>","beneficiary_name":"<full beneficiary name or null>","bank_name":"<bank name>","is_legit_receipt":true}` }
+{"amount":<number in Western numerals or null>,"currency":"OMR","date":"<YYYY-MM-DD or null>","detected_id":"<6-7 digit id in Western numerals or not_found>","account_name":"<sender full name or null>","beneficiary_name":"<beneficiary full name or null>","bank_name":"<bank name or null>","is_legit_receipt":true,"transaction_successful":<true or false>}` }
           ]
         }]
       });
@@ -351,15 +353,15 @@ Return ONLY this JSON, no markdown, no explanation:
           role: 'user',
           content: [
             { type: 'image', source: { type: 'base64', media_type: talabatMediaType, data: talabatB64 } },
-            { type: 'text', text: `This is a Talabat delivery app screenshot showing a rider's delivery history and collected cash summary.
+            { type: 'text', text: `This is a Talabat delivery app screenshot showing a rider's delivery history. It may be in English or Arabic. Arabic numerals (٠١٢٣٤٥٦٧٨٩) must be converted to Western numerals (0123456789).
 
 Extract:
-- "Collected" amount (total cash collected from deliveries) — shows like "55.90 OMR" or similar
-- Number of deliveries if visible
-- Date shown if visible
+- Collected cash amount — look for "Collected", "المحصّل", "النقد المحصّل", "إجمالي النقد", or any OMR/ر.ع amount shown as total cash collected. Convert Arabic numerals if needed (٥٥٫٩٠ = 55.90)
+- Number of deliveries — "Deliveries", "التوصيلات", "الطلبات", or a count number
+- Date shown — may be in Arabic format (١٧ مايو ٢٠٢٦ = 2026-05-17)
 
 Return ONLY this JSON, no markdown:
-{"collected_amount":<number e.g. 55.90 or null>,"deliveries":<number or null>,"date":"<YYYY-MM-DD or null>"}` }
+{"collected_amount":<number in Western numerals e.g. 55.90 or null>,"deliveries":<number or null>,"date":"<YYYY-MM-DD or null>"}` }
           ]
         }]
       });
@@ -373,6 +375,12 @@ Return ONLY this JSON, no markdown:
     // Fraud checks — only flag for real fraud, not AI reading issues
     const flags = [];
     let status = 'approved';
+
+    // Transaction success check
+    if (aiResult.transaction_successful === false) {
+      flags.push('⚠️ Transaction NOT completed — receipt may show a failed or pending transfer');
+      status = 'flagged';
+    }
 
     // Beneficiary check — must be FUTURE WAVE TECHNOLOGIES
     if (aiResult.beneficiary_name) {
