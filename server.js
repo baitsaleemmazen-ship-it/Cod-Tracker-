@@ -8,7 +8,7 @@ const fs = require('fs');
 const path = require('path');
 
 const app = express();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 app.use(express.json());
@@ -243,7 +243,9 @@ Return ONLY this JSON, no markdown, no explanation:
         }]
       });
       const raw = response.content.map(c => c.text || '').join('').replace(/```json|```/g, '').trim();
+      console.log('AI raw response:', raw);
       aiResult = JSON.parse(raw);
+      console.log('AI parsed:', JSON.stringify(aiResult));
     } catch (e) {
       console.error('AI error:', e.message);
     }
