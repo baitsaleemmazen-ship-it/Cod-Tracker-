@@ -467,6 +467,7 @@ app.post('/admin/delete/:id', requireAdmin, (req, res) => {
 });
 
 
+app.post('/admin/reject/:id', requireAdmin, (req, res) => {
   const sub = submissions.find(s => s.id === req.params.id);
   if (sub) { sub.status = 'rejected'; saveSubmissions(); }
   res.redirect('/admin');
