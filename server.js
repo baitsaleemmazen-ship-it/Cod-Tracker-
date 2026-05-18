@@ -198,11 +198,8 @@ app.get('/', (req, res) => {
   <h1>📦 COD Receipt</h1>
   <p class="sub">Submit your daily bank receipt and Talabat screenshot</p>
   <form id="form">
-    <label>Your name</label>
-    <select name="rider_id" required id="riderSel">
-      <option value="">— select your name —</option>
-      ${riders.map(r => `<option value="${r.id}">${r.name}</option>`).join('')}
-    </select>
+    <label>Your ID number</label>
+    <input type="number" name="rider_id" id="riderSel" required placeholder="Enter your ID number" style="width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:10px;font-size:16px;margin-bottom:1rem;background:#fafafa;">
 
     <div class="section">
       <div class="section-title">🏦 Bank Receipt</div>
@@ -294,7 +291,9 @@ app.post('/submit', uploadBoth, async (req, res) => {
   try {
     const { rider_id } = req.body;
     const rider = riders.find(r => r.id === rider_id);
-    if (!rider) return res.json({ ok: false, error: 'Rider not found.' });
+    // If ID not found, create a temporary rider object and flag it
+    const riderObj = rider || { id: rider_id, name: `Unknown ID: ${rider_id}` };
+    if (!rider_id) return res.json({ ok: false, error: 'Please enter your ID number.' });
     const bankFile = req.files && req.files['receipt'] && req.files['receipt'][0];
     const talabatFile = req.files && req.files['talabat'] && req.files['talabat'][0];
     if (!bankFile) return res.json({ ok: false, error: 'No bank receipt uploaded.' });
@@ -303,6 +302,12 @@ app.post('/submit', uploadBoth, async (req, res) => {
     const today = new Date(new Date().getTime() + 4*60*60*1000).toISOString().slice(0, 10);
     const todayIds = getTodayIds();
     const isDuplicate = todayIds.has(rider_id);
+
+    // Flag if ID not in rider list
+    if (!rider) {
+      flags.push(`ID ${rider_id} is not in the rider list`);
+      status = 'flagged';
+    }
 
     // AI analysis — bank receipt
     const bankB64 = bankFile.buffer.toString('base64');
@@ -429,7 +434,7 @@ Return ONLY this JSON, no markdown:
     const submission = {
       id: Date.now().toString(),
       rider_id,
-      rider_name: rider.name,
+      rider_name: riderObj.name,
       amount: aiResult.amount || null,
       currency: aiResult.currency || 'OMR',
       bank: aiResult.bank_name || 'Bank',
@@ -454,8 +459,8 @@ Return ONLY this JSON, no markdown:
 
     // WhatsApp alert
     const waMsg = status === 'flagged'
-      ? `⚠️ *COD Alert — Flagged*\nRider: ${rider.name}\nAmount: ${aiResult.amount ? aiResult.amount + ' OMR' : 'Not detected'}\nReason: ${flags.join(', ')}`
-      : `✅ *COD Submitted*\nRider: ${rider.name}\nAmount: ${aiResult.amount ? aiResult.amount + ' OMR' : 'Not detected'}${isLate ? '\n⏰ LATE submission' : ''}`;
+      ? `⚠️ *COD Alert — Flagged*\nRider: ${riderObj.name}\nAmount: ${aiResult.amount ? aiResult.amount + ' OMR' : 'Not detected'}\nReason: ${flags.join(', ')}`
+      : `✅ *COD Submitted*\nRider: ${riderObj.name}\nAmount: ${aiResult.amount ? aiResult.amount + ' OMR' : 'Not detected'}${isLate ? '\n⏰ LATE submission' : ''}`;
     sendWhatsApp(waMsg);
 
     // Auto-write to sheet if approved and amount known
