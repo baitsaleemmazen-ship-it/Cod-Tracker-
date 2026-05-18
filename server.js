@@ -58,7 +58,7 @@ function saveSubmissions() { fs.writeFileSync(SUBS_FILE, JSON.stringify(submissi
 
 // ─── Today's submitted IDs (for duplicate detection) ─────────────────────────
 function getTodayIds() {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = new Date(new Date().getTime() + 4*60*60*1000).toISOString().slice(0, 10);
   return new Set(
     submissions
       .filter(s => s.date === today && s.status === 'approved')
@@ -300,7 +300,7 @@ app.post('/submit', uploadBoth, async (req, res) => {
     if (!bankFile) return res.json({ ok: false, error: 'No bank receipt uploaded.' });
     if (!talabatFile) return res.json({ ok: false, error: 'No Talabat screenshot uploaded.' });
 
-    const today = new Date().toISOString().slice(0, 10);
+    const today = new Date(new Date().getTime() + 4*60*60*1000).toISOString().slice(0, 10);
     const todayIds = getTodayIds();
     const isDuplicate = todayIds.has(rider_id);
 
@@ -422,6 +422,10 @@ Return ONLY this JSON, no markdown:
     // Soft flag only (still approved): amount not detected — admin enters manually
     const needsAmount = !aiResult.amount;
 
+    // Late submission check (after 8 PM GMT+4)
+    const gmt4Hour = new Date(new Date().getTime() + 4*60*60*1000).getHours();
+    const isLate = gmt4Hour >= 18;
+
     const submission = {
       id: Date.now().toString(),
       rider_id,
@@ -440,14 +444,19 @@ Return ONLY this JSON, no markdown:
       image_type: bankMediaType,
       account_name: aiResult.account_name || null,
       beneficiary_name: aiResult.beneficiary_name || null,
-      talabat_amount: talabatResult.collected_amount || null,
-      talabat_deliveries: talabatResult.deliveries || null,
       talabat_b64: talabatB64,
       talabat_type: talabatMediaType,
+      is_late: isLate
     };
 
     submissions.push(submission);
     saveSubmissions();
+
+    // WhatsApp alert
+    const waMsg = status === 'flagged'
+      ? `⚠️ *COD Alert — Flagged*\nRider: ${rider.name}\nAmount: ${aiResult.amount ? aiResult.amount + ' OMR' : 'Not detected'}\nReason: ${flags.join(', ')}`
+      : `✅ *COD Submitted*\nRider: ${rider.name}\nAmount: ${aiResult.amount ? aiResult.amount + ' OMR' : 'Not detected'}${isLate ? '\n⏰ LATE submission' : ''}`;
+    sendWhatsApp(waMsg);
 
     // Auto-write to sheet if approved and amount known
     if (status === 'approved' && aiResult.amount) {
@@ -515,103 +524,177 @@ app.post('/admin/login', (req, res) => {
 
 app.get('/admin/logout', (req, res) => { req.session.destroy(); res.redirect('/admin/login'); });
 
+// ─── WhatsApp notification via CallMeBot ─────────────────────────────────────
+async function sendWhatsApp(message) {
+  try {
+    const phone = process.env.WA_PHONE;
+    const apiKey = process.env.WA_APIKEY;
+    if (!phone || !apiKey) return;
+    const encoded = encodeURIComponent(message);
+    const url = `https://api.callmebot.com/whatsapp.php?phone=${phone}&text=${encoded}&apikey=${apiKey}`;
+    await fetch(url);
+  } catch (e) { console.error('WhatsApp error:', e.message); }
+}
+
+// ─── 8 PM daily summary (GMT+4) ──────────────────────────────────────────────
+function scheduleDailySummary() {
+  const now = new Date();
+  const gmt4 = new Date(now.getTime() + 4 * 60 * 60 * 1000);
+  const next610pm = new Date(gmt4);
+  next610pm.setHours(18, 10, 0, 0);
+  if (gmt4 >= next610pm) next610pm.setDate(next610pm.getDate() + 1);
+  const msUntil = next610pm - gmt4;
+  setTimeout(async () => {
+    const today = new Date(new Date().getTime() + 4*60*60*1000).toISOString().slice(0,10);
+    const todaySubs = submissions.filter(s => s.date === today);
+    const approved = todaySubs.filter(s => s.status === 'approved');
+    const flagged = todaySubs.filter(s => s.status === 'flagged');
+    const pending = riders.filter(r => !todaySubs.find(s => s.rider_id === r.id));
+    const totalAmt = approved.reduce((s,e) => s+(parseFloat(e.amount)||0), 0);
+    const msg = `📦 *COD Daily Summary - ${today}*\n\n✅ Submitted: ${approved.length}\n⚠️ Flagged: ${flagged.length}\n❌ Not submitted: ${pending.length}\n💰 Total COD: ${totalAmt.toFixed(3)} OMR\n\n${pending.length > 0 ? '❌ Missing:\n' + pending.slice(0,10).map(r=>`• ${r.name}`).join('\n') : '✅ All riders submitted!'}`;
+    await sendWhatsApp(msg);
+    scheduleDailySummary();
+  }, msUntil);
+}
+scheduleDailySummary();
+
 // ══════════════════════════════════════════════════════════════════════════════
 // ADMIN — dashboard
 // ══════════════════════════════════════════════════════════════════════════════
 app.get('/admin', requireAdmin, (req, res) => {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = new Date(new Date().getTime() + 4*60*60*1000).toISOString().slice(0,10);
   const todaySubs = submissions.filter(s => s.date === today);
   const approved = todaySubs.filter(s => s.status === 'approved');
   const flagged = todaySubs.filter(s => s.status === 'flagged');
   const totalAmt = approved.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
+  const submittedIds = new Set(todaySubs.map(s => s.rider_id));
+  const pendingRiders = riders.filter(r => !submittedIds.has(r.id));
 
   const rows = todaySubs.sort((a, b) => b.submitted_at.localeCompare(a.submitted_at)).map(s => `
     <tr>
       <td>
-        ${s.image_b64 ? `<a href="/receipt/${s.id}" target="_blank"><img src="/receipt/${s.id}" style="width:56px;height:56px;object-fit:cover;border-radius:8px;border:1px solid #eee;display:block;" alt="receipt"></a>` : '<div style="width:56px;height:56px;background:#f5f5f5;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px;">📄</div>'}
+        ${s.image_b64 ? `<a href="/receipt/${s.id}" target="_blank"><img src="/receipt/${s.id}" style="width:48px;height:48px;object-fit:cover;border-radius:8px;border:1px solid #eee;display:block;" alt="receipt"></a>` : '<div style="width:48px;height:48px;background:#f5f5f5;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;">📄</div>'}
       </td>
-      <td style="font-weight:500;">${s.rider_name}</td>
-      <td style="color:#888;">${s.rider_id}</td>
-      <td style="font-weight:600;">${s.amount ? s.amount.toLocaleString() + ' OMR' : '<span style="color:#c62828;">Not detected</span>'}</td>
-      <td style="font-weight:600;color:#e65100;">${s.talabat_amount ? s.talabat_amount.toLocaleString() + ' OMR' : '—'}</td>
-      <td>${new Date(s.submitted_at).toLocaleTimeString()}</td>
+      <td style="font-weight:500;font-size:13px;">${s.rider_name}${s.is_late ? ' <span style="background:#fff3e0;color:#e65100;font-size:10px;padding:1px 5px;border-radius:4px;">LATE</span>' : ''}</td>
+      <td style="color:#888;font-size:12px;">${s.rider_id}</td>
+      <td style="font-weight:600;font-size:13px;">${s.amount ? s.amount.toLocaleString() + ' OMR' : '<span style="color:#c62828;font-size:12px;">—</span>'}</td>
+      <td style="font-weight:600;color:#e65100;font-size:13px;">${s.talabat_amount ? s.talabat_amount.toLocaleString() + ' OMR' : '—'}</td>
+      <td style="font-size:12px;color:#888;">${new Date(s.submitted_at).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})}</td>
       <td>
         <span class="badge ${s.status === 'approved' ? 'ok' : s.status === 'flagged' ? 'flagged' : 'rej'}">
-          ${s.status === 'approved' ? '✓ Approved' : s.status === 'flagged' ? '⚠ Flagged' : '✗ Rejected'}
+          ${s.status === 'approved' ? '✓' : s.status === 'flagged' ? '⚠' : '✗'} ${s.status === 'approved' ? 'OK' : s.status === 'flagged' ? 'Flag' : 'Rej'}
         </span>
-          ${s.status === 'flagged' || s.needs_amount ? `
-          ${s.flags.length ? `<div style="font-size:11px;color:#c62828;margin-top:4px;">${s.flags.join('<br>')}</div>` : ''}
-          ${s.account_name ? `<div style="font-size:11px;color:#888;margin-top:3px;">Sender: ${s.account_name}</div>` : ''}
-          ${s.beneficiary_name ? `<div style="font-size:11px;color:#888;margin-top:2px;">Beneficiary: ${s.beneficiary_name}</div>` : ''}
-          ${s.needs_amount && s.status !== 'flagged' ? `<div style="font-size:11px;color:#e65100;margin-top:4px;">⚠ Amount not detected — enter manually</div>` : ''}
-          <form method="POST" action="/admin/approve/${s.id}" style="margin:6px 0 4px;">
-            <input name="manual_amount" type="number" step="0.01" placeholder="Enter amount (OMR)" value="${s.amount || ''}" style="width:100%;padding:5px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;margin-bottom:4px;" ${s.amount ? '' : 'required'}>
-            <div style="display:flex;gap:6px;">
-              <button class="act-btn ok-btn" type="submit">✓ Approve</button>
-              <a href="/receipt/${s.id}" target="_blank" class="act-btn" style="background:#e8f0fe;color:#1a73e8;text-decoration:none;padding:4px 10px;border-radius:6px;font-size:12px;">👁 Bank</a>
-              ${s.talabat_b64 ? `<a href="/talabat/${s.id}" target="_blank" class="act-btn" style="background:#fff3e0;color:#e65100;text-decoration:none;padding:4px 10px;border-radius:6px;font-size:12px;">🛵 Talabat</a>` : ''}
+        ${s.status === 'flagged' || s.needs_amount ? `
+          ${s.flags && s.flags.length ? `<div style="font-size:10px;color:#c62828;margin-top:3px;">${s.flags.join('<br>')}</div>` : ''}
+          ${s.account_name ? `<div style="font-size:10px;color:#888;margin-top:2px;">👤 ${s.account_name}</div>` : ''}
+          ${s.beneficiary_name ? `<div style="font-size:10px;color:#888;">→ ${s.beneficiary_name}</div>` : ''}
+          <form method="POST" action="/admin/approve/${s.id}" style="margin:5px 0 3px;">
+            <input name="manual_amount" type="number" step="0.01" placeholder="Amount (OMR)" value="${s.amount || ''}" style="width:100%;padding:4px 7px;border:1px solid #ddd;border-radius:6px;font-size:12px;margin-bottom:4px;" ${s.amount ? '' : 'required'}>
+            <div style="display:flex;gap:4px;flex-wrap:wrap;">
+              <button class="act-btn ok-btn">✓ Approve</button>
+              ${s.image_b64 ? `<a href="/receipt/${s.id}" target="_blank" class="act-btn" style="background:#e8f0fe;color:#1a73e8;text-decoration:none;">👁 Bank</a>` : ''}
+              ${s.talabat_b64 ? `<a href="/talabat/${s.id}" target="_blank" class="act-btn" style="background:#fff3e0;color:#e65100;text-decoration:none;">🛵</a>` : ''}
             </div>
           </form>
-          ${s.status === 'flagged' ? `<form method="POST" action="/admin/reject/${s.id}" style="margin:0 0 4px;"><button class="act-btn rej-btn">✗ Reject</button></form>` : ''}
-          <form method="POST" action="/admin/delete/${s.id}" onsubmit="return confirm('Delete this submission?')" style="margin:0;"><button class="act-btn" style="background:#f5f5f5;color:#888;font-size:11px;">🗑 Delete</button></form>` :
-          `<div style="margin-top:4px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-            ${s.image_b64 ? `<a href="/receipt/${s.id}" target="_blank" style="font-size:11px;color:#1a73e8;">👁 Bank receipt</a>` : ''}
+          <div style="display:flex;gap:4px;margin-top:3px;">
+            ${s.status === 'flagged' ? `<form method="POST" action="/admin/reject/${s.id}" style="margin:0;"><button class="act-btn rej-btn">✗ Reject</button></form>` : ''}
+            <form method="POST" action="/admin/delete/${s.id}" onsubmit="return confirm('Delete?')" style="margin:0;"><button class="act-btn" style="background:#f5f5f5;color:#888;">🗑</button></form>
+          </div>` :
+          `<div style="margin-top:3px;display:flex;gap:4px;flex-wrap:wrap;align-items:center;">
+            ${s.image_b64 ? `<a href="/receipt/${s.id}" target="_blank" style="font-size:11px;color:#1a73e8;">👁 Bank</a>` : ''}
             ${s.talabat_b64 ? `<a href="/talabat/${s.id}" target="_blank" style="font-size:11px;color:#e65100;">🛵 Talabat</a>` : ''}
-            <form method="POST" action="/admin/delete/${s.id}" onsubmit="return confirm('Delete this submission?')" style="margin:0;"><button class="act-btn" style="background:#f5f5f5;color:#888;font-size:11px;">🗑 Delete</button></form>
+            <a href="/admin/edit/${s.id}" style="font-size:11px;color:#888;">✏️ Edit</a>
+            <form method="POST" action="/admin/delete/${s.id}" onsubmit="return confirm('Delete?')" style="margin:0;"><button class="act-btn" style="background:#f5f5f5;color:#888;font-size:11px;">🗑</button></form>
           </div>`}
       </td>
     </tr>`).join('');
 
+  const pendingRows = pendingRiders.map(r => `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid #f5f5f5;">
+      <span style="font-size:13px;">❌ ${r.name}</span>
+      <span style="font-size:11px;color:#aaa;">${r.id}</span>
+    </div>`).join('');
+
   res.send(`<!DOCTYPE html><html><head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>COD Admin Dashboard</title>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>COD Dashboard</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0;}
-  body{font-family:-apple-system,sans-serif;background:#f5f5f5;color:#222;}
-  .topbar{background:#fff;padding:0.875rem 1.5rem;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #eee;position:sticky;top:0;z-index:10;}
-  .topbar h1{font-size:17px;font-weight:600;}
-  .topbar-links{display:flex;gap:12px;align-items:center;}
-  .topbar-links a{font-size:13px;color:#1a73e8;text-decoration:none;padding:6px 12px;border:1px solid #ddd;border-radius:8px;}
-  .content{padding:1.5rem;max-width:1000px;margin:0 auto;}
-  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:1.5rem;}
-  .stat{background:#fff;border-radius:12px;padding:1rem 1.25rem;border:1px solid #eee;}
-  .stat-val{font-size:26px;font-weight:600;}
-  .stat-lbl{font-size:12px;color:#888;margin-top:2px;}
-  table{width:100%;background:#fff;border-radius:12px;border-collapse:collapse;overflow:hidden;border:1px solid #eee;}
-  th{text-align:left;font-size:12px;font-weight:600;color:#888;padding:10px 12px;border-bottom:1px solid #eee;text-transform:uppercase;letter-spacing:0.03em;}
-  td{padding:10px 12px;font-size:13px;border-bottom:1px solid #f5f5f5;vertical-align:top;}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;color:#222;font-size:14px;}
+  .topbar{background:#fff;padding:12px 16px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #eee;position:sticky;top:0;z-index:10;}
+  .topbar h1{font-size:16px;font-weight:700;}
+  .topbar-links{display:flex;gap:8px;}
+  .topbar-links a{font-size:12px;color:#1a73e8;text-decoration:none;padding:5px 10px;border:1px solid #ddd;border-radius:8px;white-space:nowrap;}
+  .content{padding:12px;max-width:900px;margin:0 auto;}
+  .stats{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:12px;}
+  @media(min-width:600px){.stats{grid-template-columns:repeat(4,1fr);}}
+  .stat{background:#fff;border-radius:12px;padding:12px;border:1px solid #eee;text-align:center;}
+  .stat-val{font-size:24px;font-weight:700;}
+  .stat-lbl{font-size:11px;color:#888;margin-top:2px;}
+  .section{background:#fff;border-radius:12px;border:1px solid #eee;margin-bottom:12px;overflow:hidden;}
+  .section-hdr{padding:10px 14px;font-size:13px;font-weight:600;border-bottom:1px solid #eee;display:flex;align-items:center;justify-content:space-between;}
+  .pending-list{padding:0 14px;max-height:200px;overflow-y:auto;}
+  table{width:100%;border-collapse:collapse;}
+  th{text-align:left;font-size:11px;font-weight:600;color:#888;padding:8px 10px;border-bottom:1px solid #eee;text-transform:uppercase;white-space:nowrap;}
+  td{padding:8px 10px;font-size:13px;border-bottom:1px solid #f5f5f5;vertical-align:top;}
   tr:last-child td{border-bottom:none;}
-  .badge{font-size:11px;font-weight:600;padding:3px 10px;border-radius:999px;display:inline-block;}
+  .badge{font-size:11px;font-weight:600;padding:2px 7px;border-radius:999px;display:inline-block;white-space:nowrap;}
   .badge.ok{background:#e6f4ea;color:#1e7e34;}
   .badge.flagged{background:#fce8e6;color:#c62828;}
   .badge.rej{background:#f5f5f5;color:#888;}
-  .act-btn{font-size:12px;padding:4px 10px;border-radius:6px;cursor:pointer;border:none;font-weight:500;}
+  .act-btn{font-size:11px;padding:3px 8px;border-radius:6px;cursor:pointer;border:none;font-weight:500;display:inline-block;}
   .ok-btn{background:#e6f4ea;color:#1e7e34;}
   .rej-btn{background:#fce8e6;color:#c62828;}
-  .empty{text-align:center;padding:3rem;color:#aaa;font-size:14px;}
-  @media(max-width:600px){.stats{grid-template-columns:repeat(2,1fr);}th:nth-child(4),td:nth-child(4){display:none;}}
+  @media(max-width:500px){th:nth-child(3),td:nth-child(3),th:nth-child(5),td:nth-child(5){display:none;}}
 </style>
-<meta http-equiv="refresh" content="30">
+<meta http-equiv="refresh" content="10">
+<script>
+// Auto-refresh every 10 seconds, but pause if user is interacting with a form
+let refreshTimer;
+function resetRefresh() {
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(() => location.reload(), 10000);
+}
+document.addEventListener('DOMContentLoaded', () => {
+  resetRefresh();
+  document.querySelectorAll('input, button, select').forEach(el => {
+    el.addEventListener('focus', () => clearTimeout(refreshTimer));
+    el.addEventListener('blur', resetRefresh);
+  });
+});
+</script>
 </head><body>
 <div class="topbar">
-  <h1>📦 COD Dashboard</h1>
+  <h1>📦 COD</h1>
   <div class="topbar-links">
-    <a href="/admin/riders">Manage riders</a>
-    <a href="/admin/export">Export CSV</a>
-    <a href="/admin/logout">Logout</a>
+    <a href="/admin/riders">👥 Riders</a>
+    <a href="/admin/export">⬇️ CSV</a>
+    <a href="/admin/logout">🚪</a>
   </div>
 </div>
 <div class="content">
   <div class="stats">
-    <div class="stat"><div class="stat-val">${todaySubs.length}</div><div class="stat-lbl">Submissions today</div></div>
-    <div class="stat"><div class="stat-val" style="color:#1e7e34;">${approved.length}</div><div class="stat-lbl">Approved</div></div>
-    <div class="stat"><div class="stat-val" style="color:#c62828;">${flagged.length}</div><div class="stat-lbl">Flagged</div></div>
-    <div class="stat"><div class="stat-val" style="font-size:18px;padding-top:4px;">${totalAmt.toLocaleString(undefined,{maximumFractionDigits:2})} OMR</div><div class="stat-lbl">Total COD approved</div></div>
+    <div class="stat"><div class="stat-val">${todaySubs.length}</div><div class="stat-lbl">Submitted</div></div>
+    <div class="stat"><div class="stat-val" style="color:#c62828;">${pendingRiders.length}</div><div class="stat-lbl">Not submitted</div></div>
+    <div class="stat"><div class="stat-val" style="color:#e65100;">${flagged.length}</div><div class="stat-lbl">Flagged</div></div>
+    <div class="stat"><div class="stat-val" style="font-size:16px;padding-top:6px;">${totalAmt.toFixed(3)}<br><span style="font-size:11px;color:#888;">OMR</span></div><div class="stat-lbl">Total COD</div></div>
   </div>
-  <table>
-    <thead><tr><th>Receipt</th><th>Rider</th><th>ID</th><th>Bank Amount</th><th>Talabat</th><th>Time</th><th>Status</th></tr></thead>
-    <tbody>${rows || '<tr><td colspan="6" class="empty">No submissions yet today.</td></tr>'}</tbody>
-  </table>
+
+  ${pendingRiders.length > 0 ? `
+  <div class="section">
+    <div class="section-hdr"><span>❌ Not submitted yet (${pendingRiders.length})</span></div>
+    <div class="pending-list">${pendingRows}</div>
+  </div>` : `<div class="section"><div class="section-hdr" style="color:#1e7e34;">✅ All riders submitted today!</div></div>`}
+
+  <div class="section">
+    <div class="section-hdr">📋 Today's submissions</div>
+    <div style="overflow-x:auto;">
+    <table>
+      <thead><tr><th>📄</th><th>Rider</th><th>ID</th><th>Bank</th><th>Talabat</th><th>Time</th><th>Status</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="7" style="text-align:center;padding:2rem;color:#aaa;">No submissions yet</td></tr>'}</tbody>
+    </table>
+    </div>
+  </div>
 </div>
 </body></html>`);
 });
@@ -621,18 +704,51 @@ app.post('/admin/approve/:id', requireAdmin, async (req, res) => {
   const sub = submissions.find(s => s.id === req.params.id);
   if (sub) {
     sub.status = 'approved';
-    // Use manually entered amount if AI didn't detect it
-    if (req.body.manual_amount && !sub.amount) {
-      sub.amount = parseFloat(req.body.manual_amount);
-    } else if (req.body.manual_amount) {
+    if (req.body.manual_amount) {
       sub.amount = parseFloat(req.body.manual_amount);
     }
     sub.bank = sub.bank || 'Bank';
     saveSubmissions();
-    await fillRiderRow(sub);
+    res.redirect('/admin');
+    // Write to sheet in background — don't block response
+    fillRiderRow(sub).catch(e => console.error('Sheet write error:', e.message));
+  } else {
+    res.redirect('/admin');
+  }
+});
+
+// ─── Edit amount ──────────────────────────────────────────────────────────────
+app.get('/admin/edit/:id', requireAdmin, (req, res) => {
+  const sub = submissions.find(s => s.id === req.params.id);
+  if (!sub) return res.redirect('/admin');
+  res.send(`<!DOCTYPE html><html><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Edit Amount</title>
+<style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:-apple-system,sans-serif;background:#f5f5f5;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:1rem;}.card{background:#fff;padding:1.5rem;border-radius:16px;width:100%;max-width:360px;}h2{font-size:16px;margin-bottom:1rem;}label{font-size:13px;color:#666;display:block;margin-bottom:4px;}input{width:100%;padding:10px;border:1px solid #ddd;border-radius:8px;font-size:14px;margin-bottom:1rem;}button{width:100%;padding:11px;background:#1a73e8;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;}.back{display:block;text-align:center;margin-top:0.75rem;font-size:13px;color:#1a73e8;text-decoration:none;}</style>
+</head><body><div class="card">
+  <h2>✏️ Edit — ${sub.rider_name}</h2>
+  <form method="POST" action="/admin/edit/${sub.id}">
+    <label>Bank Amount (OMR)</label>
+    <input type="number" step="0.001" name="amount" value="${sub.amount || ''}" placeholder="e.g. 11.960" required>
+    <label>Talabat Collected (OMR)</label>
+    <input type="number" step="0.01" name="talabat_amount" value="${sub.talabat_amount || ''}" placeholder="e.g. 55.90">
+    <button type="submit">Save changes</button>
+  </form>
+  <a href="/admin" class="back">← Back to dashboard</a>
+</div></body></html>`);
+});
+
+app.post('/admin/edit/:id', requireAdmin, async (req, res) => {
+  const sub = submissions.find(s => s.id === req.params.id);
+  if (sub) {
+    sub.amount = parseFloat(req.body.amount) || sub.amount;
+    sub.talabat_amount = parseFloat(req.body.talabat_amount) || sub.talabat_amount;
+    saveSubmissions();
+    if (sub.status === 'approved') await fillRiderRow(sub);
   }
   res.redirect('/admin');
 });
+
 
 app.post('/admin/delete/:id', requireAdmin, (req, res) => {
   submissions = submissions.filter(s => s.id !== req.params.id);
