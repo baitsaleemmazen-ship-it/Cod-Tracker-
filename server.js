@@ -333,30 +333,32 @@ async function fillRiderRow(submission) {
     const sheetObj = meta.data.sheets.find(s => s.properties.title === sheetName);
     const sheetId = sheetObj ? sheetObj.properties.sheetId : null;
 
-    // Get all rows to find rider's row (data starts at row 4, index 3)
-    const res = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${sheetName}!A:C` });
-    const rows = res.data.values || [];
+    // Get all rows to find rider's row
+    // Sheet structure: Row1=Company, Row2=Date, Row3=Headers, Row4+=Riders
+    // Columns: A=#, B=Name, C=ID, D=Bank Amount, E=Talabat, F=Bank, G=Time, H=Status
+    const res = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${sheetName}!C:C` });
+    const idCol = res.data.values || [];
 
     const isLate = submission.is_late || false;
     const statusText = isLate ? 'Late' : 'Submitted';
 
-    // Find rider row by ID (column C, index 2), data starts at row index 3
+    // Find rider row by ID in column C — data starts at row index 3 (row 4 in sheet)
     let rowIndex = -1;
-    for (let i = 3; i < rows.length; i++) {
-      if (rows[i] && rows[i][2] === submission.rider_id) {
+    for (let i = 3; i < idCol.length; i++) {
+      if (idCol[i] && idCol[i][0] && idCol[i][0].toString().trim() === submission.rider_id.toString().trim()) {
         rowIndex = i + 1; // 1-indexed for Sheets API
         break;
       }
     }
 
     if (rowIndex === -1) {
-      // Append at end
+      // Rider not found — append at end
       await sheets.spreadsheets.values.append({
         spreadsheetId, range: `${sheetName}!A:H`, valueInputOption: 'RAW',
-        requestBody: { values: [[riders.length + 1, submission.rider_name, submission.rider_id, submission.amount || '', submission.talabat_amount || '', submission.bank || '', new Date(submission.submitted_at).toLocaleTimeString(), statusText]] }
+        requestBody: { values: [['', submission.rider_name, submission.rider_id, submission.amount || '', submission.talabat_amount || '', submission.bank || '', new Date(submission.submitted_at).toLocaleTimeString(), statusText]] }
       });
     } else {
-      // Fill rider's row (columns D-H, index 3-7)
+      // Fill rider's existing row — columns D to H (Bank Amount, Talabat, Bank, Time, Status)
       await sheets.spreadsheets.values.update({
         spreadsheetId, range: `${sheetName}!D${rowIndex}:H${rowIndex}`, valueInputOption: 'RAW',
         requestBody: { values: [[submission.amount || '', submission.talabat_amount || '', submission.bank || '', new Date(submission.submitted_at).toLocaleTimeString(), statusText]] }
