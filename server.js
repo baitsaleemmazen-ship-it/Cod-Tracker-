@@ -110,31 +110,127 @@ async function getSheetAuth() {
 }
 
 async function ensureDailySheet(date) {
-  // date format: DD-MM-YYYY
   const parts = date.split('-'); // YYYY-MM-DD
   const sheetName = `${parts[2]}-${parts[1]}-${parts[0]}`; // DD-MM-YYYY
+  const displayDate = `${parts[2]}/${parts[1]}/${parts[0]}`;
   try {
     const { sheets, spreadsheetId } = await getSheetAuth();
-
-    // Get existing sheets
     const meta = await sheets.spreadsheets.get({ spreadsheetId });
-    const existing = meta.data.sheets.map(s => s.properties.title);
+    const existingSheets = meta.data.sheets;
+    const existing = existingSheets.map(s => s.properties.title);
 
     if (!existing.includes(sheetName)) {
       // Create new sheet tab
-      await sheets.spreadsheets.batchUpdate({
+      const addRes = await sheets.spreadsheets.batchUpdate({
         spreadsheetId,
         requestBody: { requests: [{ addSheet: { properties: { title: sheetName } } }] }
       });
+      const sheetId = addRes.data.replies[0].addSheet.properties.sheetId;
 
-      // Pre-populate header + all riders in order
-      const header = [['Rider Name', 'Rider ID', 'Bank Amount (OMR)', 'Talabat Collected (OMR)', 'Bank', 'Date', 'Time']];
-      const riderRows = riders.map(r => [r.name, r.id, '', '', '', '', '']);
+      // Write data: row1=company, row2=date, row3=headers, row4+=riders
+      const headers = ['#', 'Rider Name', 'Rider ID', 'Bank Amount (OMR)', 'Talabat Collected (OMR)', 'Bank', 'Submitted At', 'Status'];
+      const riderRows = riders.map((r, i) => [i + 1, r.name, r.id, '', '', '', '', 'Not Submitted']);
       await sheets.spreadsheets.values.update({
         spreadsheetId,
         range: `${sheetName}!A1`,
         valueInputOption: 'RAW',
-        requestBody: { values: [...header, ...riderRows] }
+        requestBody: { values: [
+          ['Future Wave', '', '', '', '', '', '', ''],
+          [displayDate, '', '', '', '', '', '', ''],
+          ...([headers]),
+          ...riderRows
+        ]}
+      });
+
+      const totalRows = riders.length + 3;
+      const COLS = 8; // A-H
+
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: { requests: [
+          // Merge company name row A1:H1
+          { mergeCells: { range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: COLS }, mergeType: 'MERGE_ALL' } },
+          // Merge date row A2:H2
+          { mergeCells: { range: { sheetId, startRowIndex: 1, endRowIndex: 2, startColumnIndex: 0, endColumnIndex: COLS }, mergeType: 'MERGE_ALL' } },
+
+          // Company name style — dark background, white bold large text, centered
+          { repeatCell: { range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: COLS },
+            cell: { userEnteredFormat: {
+              backgroundColor: { red: 0.067, green: 0.31, blue: 0.165 },
+              horizontalAlignment: 'CENTER', verticalAlignment: 'MIDDLE',
+              textFormat: { foregroundColor: { red: 1, green: 1, blue: 1 }, bold: true, fontSize: 16 }
+            }}, fields: 'userEnteredFormat' }},
+
+          // Date row style — light green background, dark text, centered
+          { repeatCell: { range: { sheetId, startRowIndex: 1, endRowIndex: 2, startColumnIndex: 0, endColumnIndex: COLS },
+            cell: { userEnteredFormat: {
+              backgroundColor: { red: 0.851, green: 0.918, blue: 0.863 },
+              horizontalAlignment: 'CENTER', verticalAlignment: 'MIDDLE',
+              textFormat: { foregroundColor: { red: 0.067, green: 0.31, blue: 0.165 }, bold: true, fontSize: 12 }
+            }}, fields: 'userEnteredFormat' }},
+
+          // Header row style — dark green background, white bold text, centered
+          { repeatCell: { range: { sheetId, startRowIndex: 2, endRowIndex: 3, startColumnIndex: 0, endColumnIndex: COLS },
+            cell: { userEnteredFormat: {
+              backgroundColor: { red: 0.067, green: 0.31, blue: 0.165 },
+              horizontalAlignment: 'CENTER', verticalAlignment: 'MIDDLE',
+              textFormat: { foregroundColor: { red: 1, green: 1, blue: 1 }, bold: true, fontSize: 11 }
+            }}, fields: 'userEnteredFormat' }},
+
+          // All rider rows — default white background, centered text
+          { repeatCell: { range: { sheetId, startRowIndex: 3, endRowIndex: totalRows, startColumnIndex: 0, endColumnIndex: COLS },
+            cell: { userEnteredFormat: {
+              backgroundColor: { red: 1, green: 1, blue: 1 },
+              horizontalAlignment: 'CENTER', verticalAlignment: 'MIDDLE',
+              textFormat: { fontSize: 10 }
+            }}, fields: 'userEnteredFormat' }},
+
+          // Status column (H) — red for "Not Submitted"
+          { repeatCell: { range: { sheetId, startRowIndex: 3, endRowIndex: totalRows, startColumnIndex: 7, endColumnIndex: 8 },
+            cell: { userEnteredFormat: {
+              backgroundColor: { red: 0.957, green: 0.8, blue: 0.8 },
+              horizontalAlignment: 'CENTER',
+              textFormat: { foregroundColor: { red: 0.6, green: 0.0, blue: 0.0 }, bold: true, fontSize: 10 }
+            }}, fields: 'userEnteredFormat' }},
+
+          // Alternating row colors for rider rows
+          ...riders.map((_, i) => ({
+            repeatCell: {
+              range: { sheetId, startRowIndex: 3 + i, endRowIndex: 4 + i, startColumnIndex: 0, endColumnIndex: 7 },
+              cell: { userEnteredFormat: {
+                backgroundColor: i % 2 === 0
+                  ? { red: 1, green: 1, blue: 1 }
+                  : { red: 0.949, green: 0.949, blue: 0.949 }
+              }}, fields: 'userEnteredFormat(backgroundColor)'
+            }
+          })),
+
+          // Row heights
+          { updateDimensionProperties: { range: { sheetId, dimension: 'ROWS', startIndex: 0, endIndex: 1 }, properties: { pixelSize: 45 }, fields: 'pixelSize' } },
+          { updateDimensionProperties: { range: { sheetId, dimension: 'ROWS', startIndex: 1, endIndex: 2 }, properties: { pixelSize: 30 }, fields: 'pixelSize' } },
+          { updateDimensionProperties: { range: { sheetId, dimension: 'ROWS', startIndex: 2, endIndex: 3 }, properties: { pixelSize: 30 }, fields: 'pixelSize' } },
+          { updateDimensionProperties: { range: { sheetId, dimension: 'ROWS', startIndex: 3, endIndex: totalRows }, properties: { pixelSize: 25 }, fields: 'pixelSize' } },
+
+          // Column widths
+          { updateDimensionProperties: { range: { sheetId, dimension: 'COLUMNS', startIndex: 0, endIndex: 1 }, properties: { pixelSize: 40 }, fields: 'pixelSize' } },   // #
+          { updateDimensionProperties: { range: { sheetId, dimension: 'COLUMNS', startIndex: 1, endIndex: 2 }, properties: { pixelSize: 180 }, fields: 'pixelSize' } },  // Name
+          { updateDimensionProperties: { range: { sheetId, dimension: 'COLUMNS', startIndex: 2, endIndex: 3 }, properties: { pixelSize: 100 }, fields: 'pixelSize' } },  // ID
+          { updateDimensionProperties: { range: { sheetId, dimension: 'COLUMNS', startIndex: 3, endIndex: 4 }, properties: { pixelSize: 150 }, fields: 'pixelSize' } },  // Bank Amount
+          { updateDimensionProperties: { range: { sheetId, dimension: 'COLUMNS', startIndex: 4, endIndex: 5 }, properties: { pixelSize: 160 }, fields: 'pixelSize' } },  // Talabat
+          { updateDimensionProperties: { range: { sheetId, dimension: 'COLUMNS', startIndex: 5, endIndex: 6 }, properties: { pixelSize: 120 }, fields: 'pixelSize' } },  // Bank
+          { updateDimensionProperties: { range: { sheetId, dimension: 'COLUMNS', startIndex: 6, endIndex: 7 }, properties: { pixelSize: 120 }, fields: 'pixelSize' } },  // Time
+          { updateDimensionProperties: { range: { sheetId, dimension: 'COLUMNS', startIndex: 7, endIndex: 8 }, properties: { pixelSize: 120 }, fields: 'pixelSize' } },  // Status
+
+          // Borders for data area
+          { updateBorders: { range: { sheetId, startRowIndex: 2, endRowIndex: totalRows, startColumnIndex: 0, endColumnIndex: COLS },
+            top: { style: 'SOLID', width: 2, color: { red: 0.067, green: 0.31, blue: 0.165 } },
+            bottom: { style: 'SOLID', width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } },
+            left: { style: 'SOLID', width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } },
+            right: { style: 'SOLID', width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } },
+            innerHorizontal: { style: 'SOLID', width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } },
+            innerVertical: { style: 'SOLID', width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }
+          }}
+        ]}
       });
     }
     return sheetName;
@@ -150,38 +246,69 @@ async function fillRiderRow(submission) {
     const sheetName = await ensureDailySheet(submission.date);
     if (!sheetName) return false;
 
-    // Get all rows to find rider's row
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId,
-      range: `${sheetName}!A:B`
-    });
+    const meta = await sheets.spreadsheets.get({ spreadsheetId });
+    const sheetObj = meta.data.sheets.find(s => s.properties.title === sheetName);
+    const sheetId = sheetObj ? sheetObj.properties.sheetId : null;
+
+    // Get all rows to find rider's row (data starts at row 4, index 3)
+    const res = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${sheetName}!A:C` });
     const rows = res.data.values || [];
 
-    // Find rider row by ID (column B)
+    const isLate = submission.is_late || false;
+    const statusText = isLate ? 'Late' : 'Submitted';
+
+    // Find rider row by ID (column C, index 2), data starts at row index 3
     let rowIndex = -1;
-    for (let i = 1; i < rows.length; i++) {
-      if (rows[i] && rows[i][1] === submission.rider_id) {
+    for (let i = 3; i < rows.length; i++) {
+      if (rows[i] && rows[i][2] === submission.rider_id) {
         rowIndex = i + 1; // 1-indexed for Sheets API
         break;
       }
     }
 
     if (rowIndex === -1) {
-      // Rider not in sheet — append at end
+      // Append at end
       await sheets.spreadsheets.values.append({
-        spreadsheetId,
-        range: `${sheetName}!A:G`,
-        valueInputOption: 'RAW',
-        requestBody: { values: [[submission.rider_name, submission.rider_id, submission.amount || '', submission.talabat_amount || '', submission.bank || '', submission.date, new Date(submission.submitted_at).toLocaleTimeString()]] }
+        spreadsheetId, range: `${sheetName}!A:H`, valueInputOption: 'RAW',
+        requestBody: { values: [[riders.length + 1, submission.rider_name, submission.rider_id, submission.amount || '', submission.talabat_amount || '', submission.bank || '', new Date(submission.submitted_at).toLocaleTimeString(), statusText]] }
       });
     } else {
-      // Fill in the rider's pre-existing row
+      // Fill rider's row (columns D-H, index 3-7)
       await sheets.spreadsheets.values.update({
-        spreadsheetId,
-        range: `${sheetName}!C${rowIndex}:G${rowIndex}`,
-        valueInputOption: 'RAW',
-        requestBody: { values: [[submission.amount || '', submission.talabat_amount || '', submission.bank || '', submission.date, new Date(submission.submitted_at).toLocaleTimeString()]] }
+        spreadsheetId, range: `${sheetName}!D${rowIndex}:H${rowIndex}`, valueInputOption: 'RAW',
+        requestBody: { values: [[submission.amount || '', submission.talabat_amount || '', submission.bank || '', new Date(submission.submitted_at).toLocaleTimeString(), statusText]] }
       });
+
+      // Color the row — green if on time, yellow if late
+      if (sheetId !== null) {
+        const rowIdx = rowIndex - 1; // 0-indexed
+        const bgColor = isLate
+          ? { red: 1.0, green: 0.953, blue: 0.714 }   // yellow
+          : { red: 0.714, green: 0.918, blue: 0.757 }; // green
+        const textColor = isLate
+          ? { red: 0.4, green: 0.3, blue: 0.0 }
+          : { red: 0.067, green: 0.31, blue: 0.165 };
+        const statusBg = isLate
+          ? { red: 0.98, green: 0.85, blue: 0.45 }
+          : { red: 0.2, green: 0.659, blue: 0.322 };
+
+        await sheets.spreadsheets.batchUpdate({
+          spreadsheetId,
+          requestBody: { requests: [
+            // Color columns A-G (data columns)
+            { repeatCell: { range: { sheetId, startRowIndex: rowIdx, endRowIndex: rowIdx + 1, startColumnIndex: 0, endColumnIndex: 7 },
+              cell: { userEnteredFormat: { backgroundColor: bgColor, textFormat: { foregroundColor: textColor, fontSize: 10 }, horizontalAlignment: 'CENTER' } },
+              fields: 'userEnteredFormat' }},
+            // Status column H
+            { repeatCell: { range: { sheetId, startRowIndex: rowIdx, endRowIndex: rowIdx + 1, startColumnIndex: 7, endColumnIndex: 8 },
+              cell: { userEnteredFormat: {
+                backgroundColor: statusBg,
+                horizontalAlignment: 'CENTER',
+                textFormat: { foregroundColor: { red: 1, green: 1, blue: 1 }, bold: true, fontSize: 10 }
+              }}, fields: 'userEnteredFormat' }}
+          ]}
+        });
+      }
     }
     return true;
   } catch (e) {
