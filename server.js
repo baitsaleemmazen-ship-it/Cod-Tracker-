@@ -85,9 +85,92 @@ async function saveRidersToSheet() {
 const SUBS_FILE = path.join(__dirname, 'submissions.json');
 let submissions = [];
 if (fs.existsSync(SUBS_FILE)) {
-  submissions = JSON.parse(fs.readFileSync(SUBS_FILE));
+  try { submissions = JSON.parse(fs.readFileSync(SUBS_FILE)); } catch(e) { submissions = []; }
 }
-function saveSubmissions() { fs.writeFileSync(SUBS_FILE, JSON.stringify(submissions, null, 2)); }
+function saveSubmissions() {
+  try { fs.writeFileSync(SUBS_FILE, JSON.stringify(submissions, null, 2)); } catch(e) {}
+}
+
+// Load today's submissions from Google Sheet (Submissions tab) on startup
+async function loadTodaySubmissionsFromSheet() {
+  try {
+    const today = new Date(new Date().getTime() + 4*60*60*1000).toISOString().slice(0,10);
+    const { sheets, spreadsheetId } = await getSheetAuth();
+    const meta = await sheets.spreadsheets.get({ spreadsheetId });
+    const existing = meta.data.sheets.map(s => s.properties.title);
+    if (!existing.includes('Submissions')) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: { requests: [{ addSheet: { properties: { title: 'Submissions' } } }] }
+      });
+      await sheets.spreadsheets.values.update({
+        spreadsheetId, range: 'Submissions!A1',
+        valueInputOption: 'RAW',
+        requestBody: { values: [['id','rider_id','rider_name','amount','talabat_amount','bank','date','submitted_at','status','flags','is_late','account_name','beneficiary_name','needs_amount']] }
+      });
+      return;
+    }
+    const res = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Submissions!A:N' });
+    const rows = (res.data.values || []).slice(1);
+    const todayFromSheet = rows
+      .filter(r => r[6] === today)
+      .map(r => ({
+        id: r[0], rider_id: r[1], rider_name: r[2],
+        amount: r[3] ? parseFloat(r[3]) : null,
+        talabat_amount: r[4] ? parseFloat(r[4]) : null,
+        bank: r[5] || null, date: r[6], submitted_at: r[7], status: r[8],
+        flags: r[9] ? JSON.parse(r[9]) : [],
+        is_late: r[10] === 'true',
+        account_name: r[11] || null, beneficiary_name: r[12] || null,
+        needs_amount: r[13] === 'true'
+      }));
+    // Merge — keep existing (with images) and add any missing from sheet
+    const existingIds = new Set(submissions.map(s => s.id));
+    todayFromSheet.forEach(s => { if (!existingIds.has(s.id)) submissions.push(s); });
+    console.log(`Loaded ${todayFromSheet.length} today's submissions from sheet`);
+  } catch(e) { console.error('loadTodaySubmissionsFromSheet error:', e.message); }
+}
+
+async function saveSubmissionToSheet(sub) {
+  try {
+    const { sheets, spreadsheetId } = await getSheetAuth();
+    await sheets.spreadsheets.values.append({
+      spreadsheetId, range: 'Submissions!A:N', valueInputOption: 'RAW',
+      requestBody: { values: [[
+        sub.id, sub.rider_id, sub.rider_name,
+        sub.amount || '', sub.talabat_amount || '', sub.bank || '',
+        sub.date, sub.submitted_at, sub.status,
+        JSON.stringify(sub.flags || []),
+        sub.is_late ? 'true' : 'false',
+        sub.account_name || '', sub.beneficiary_name || '',
+        sub.needs_amount ? 'true' : 'false'
+      ]]}
+    });
+  } catch(e) { console.error('saveSubmissionToSheet error:', e.message); }
+}
+
+async function updateSubmissionInSheet(sub) {
+  try {
+    const { sheets, spreadsheetId } = await getSheetAuth();
+    const res = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Submissions!A:A' });
+    const ids = (res.data.values || []).map(r => r[0]);
+    const rowIndex = ids.indexOf(sub.id);
+    if (rowIndex === -1) return;
+    const rowNum = rowIndex + 1;
+    await sheets.spreadsheets.values.update({
+      spreadsheetId, range: `Submissions!A${rowNum}:N${rowNum}`, valueInputOption: 'RAW',
+      requestBody: { values: [[
+        sub.id, sub.rider_id, sub.rider_name,
+        sub.amount || '', sub.talabat_amount || '', sub.bank || '',
+        sub.date, sub.submitted_at, sub.status,
+        JSON.stringify(sub.flags || []),
+        sub.is_late ? 'true' : 'false',
+        sub.account_name || '', sub.beneficiary_name || '',
+        sub.needs_amount ? 'true' : 'false'
+      ]]}
+    });
+  } catch(e) { console.error('updateSubmissionInSheet error:', e.message); }
+}
 
 // ─── Today's submitted IDs (for duplicate detection) ─────────────────────────
 function getTodayIds() {
@@ -616,6 +699,7 @@ Return ONLY this JSON, no markdown:
 
     submissions.push(submission);
     saveSubmissions();
+    saveSubmissionToSheet(submission).catch(e => console.error('saveSubmissionToSheet error:', e.message));
 
     // WhatsApp alert
     const waMsg = status === 'flagged'
@@ -875,7 +959,7 @@ app.post('/admin/approve/:id', requireAdmin, async (req, res) => {
     sub.bank = sub.bank || 'Bank';
     saveSubmissions();
     res.redirect('/admin');
-    // Write to sheet in background — don't block response
+    updateSubmissionInSheet(sub).catch(e => console.error('updateSubmissionInSheet error:', e.message));
     fillRiderRow(sub).catch(e => console.error('Sheet write error:', e.message));
   } else {
     res.redirect('/admin');
@@ -924,7 +1008,11 @@ app.post('/admin/delete/:id', requireAdmin, (req, res) => {
 
 app.post('/admin/reject/:id', requireAdmin, (req, res) => {
   const sub = submissions.find(s => s.id === req.params.id);
-  if (sub) { sub.status = 'rejected'; saveSubmissions(); }
+  if (sub) {
+    sub.status = 'rejected';
+    saveSubmissions();
+    updateSubmissionInSheet(sub).catch(e => console.error(e.message));
+  }
   res.redirect('/admin');
 });
 
@@ -1013,6 +1101,8 @@ app.get('/admin/export', requireAdmin, (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`COD Tracker running on port ${PORT}`);
-  // Load riders from Google Sheet after server starts
-  getSheetAuth().then(() => loadRidersFromSheet()).catch(e => console.error('Startup sheet error:', e.message));
+  getSheetAuth().then(async () => {
+    await loadRidersFromSheet();
+    await loadTodaySubmissionsFromSheet();
+  }).catch(e => console.error('Startup sheet error:', e.message));
 });
