@@ -21,32 +21,65 @@ app.use(session({
   cookie: { maxAge: 8 * 60 * 60 * 1000 }
 }));
 
-// ─── Riders store (in-memory, persisted to riders.json) ───────────────────────
-const RIDERS_FILE = path.join(__dirname, 'riders.json');
-let riders = [];
-if (fs.existsSync(RIDERS_FILE)) {
-  riders = JSON.parse(fs.readFileSync(RIDERS_FILE));
-} else {
-  riders = [
-    {id:"768546",name:"Waleed Hamad"},{id:"839888",name:"Umar Altaf"},{id:"879982",name:"Mohammed Imran"},
-    {id:"885396",name:"Abdur Rahman"},{id:"896229",name:"Ghayoor Ahmed"},{id:"896228",name:"Imran Solman"},
-    {id:"925662",name:"Yakub Hossain"},{id:"925731",name:"Abu Sufian"},{id:"938330",name:"Mohammed Shahid"},
-    {id:"939163",name:"Anowar Hossain"},{id:"939171",name:"Md Alamgir Hossein"},{id:"1036871",name:"Moshiur Rahman"},
-    {id:"1036793",name:"Sohid Islam"},{id:"1383612",name:"MD Mohin Uddin"},{id:"1423878",name:"Md Mahfujur"},
-    {id:"1423882",name:"Muhammad Ilyas"},{id:"1397838",name:"Ali Raza"},{id:"2111340",name:"Nurul Islam"},
-    {id:"2110059",name:"Tajul Islam"},{id:"2112576",name:"Muhammad Javed"},{id:"2116901",name:"Mosharaf Hossain"},
-    {id:"2113747",name:"Md Kamal Hossain"},{id:"2110038",name:"Muhammad Arslan"},{id:"2114891",name:"Ismail Latif"},
-    {id:"2129901",name:"Md Jamal Hussain"},{id:"2836733",name:"Naeem Shahzad"},{id:"3807922",name:"Kashif Iqbal"},
-    {id:"3877440",name:"Mohammed Nadeem"},{id:"1383608",name:"Amer Shazad"},{id:"1417159",name:"Shazad Saleem"},
-    {id:"1629806",name:"Mohammed Wajid"},{id:"925713",name:"Mohammed Ali"},{id:"4516509",name:"Omar Gaber"},
-    {id:"4478518",name:"Ahmed Al Alwai"},{id:"4520599",name:"Badar Almukhaini"},{id:"4559077",name:"Sabir Albalushi"},
-    {id:"4559994",name:"Sarmad Said"},{id:"4594386",name:"Sujit Dhirendra"},{id:"4564834",name:"Feysal Alaamri"},
-    {id:"4572472",name:"Mohammed Shahid 2"},{id:"4607634",name:"Faysal Ahmed"},{id:"4602593",name:"Hamid Jadad"},
-    {id:"4611922",name:"Salah Al Hajri"},{id:"1421555",name:"Shaikh Habib"}
-  ];
-  fs.writeFileSync(RIDERS_FILE, JSON.stringify(riders, null, 2));
+// ─── Riders store (Google Sheet as source of truth) ──────────────────────────
+let riders = [
+  {id:"768546",name:"Waleed Hamad"},{id:"839888",name:"Umar Altaf"},{id:"879982",name:"Mohammed Imran"},
+  {id:"885396",name:"Abdur Rahman"},{id:"896229",name:"Ghayoor Ahmed"},{id:"896228",name:"Imran Solman"},
+  {id:"925662",name:"Yakub Hossain"},{id:"925731",name:"Abu Sufian"},{id:"938330",name:"Mohammed Shahid"},
+  {id:"939163",name:"Anowar Hossain"},{id:"939171",name:"Md Alamgir Hossein"},{id:"1036871",name:"Moshiur Rahman"},
+  {id:"1036793",name:"Sohid Islam"},{id:"1383612",name:"MD Mohin Uddin"},{id:"1423878",name:"Md Mahfujur"},
+  {id:"1423882",name:"Muhammad Ilyas"},{id:"1397838",name:"Ali Raza"},{id:"2111340",name:"Nurul Islam"},
+  {id:"2110059",name:"Tajul Islam"},{id:"2112576",name:"Muhammad Javed"},{id:"2116901",name:"Mosharaf Hossain"},
+  {id:"2113747",name:"Md Kamal Hossain"},{id:"2110038",name:"Muhammad Arslan"},{id:"2114891",name:"Ismail Latif"},
+  {id:"2129901",name:"Md Jamal Hussain"},{id:"2836733",name:"Naeem Shahzad"},{id:"3807922",name:"Kashif Iqbal"},
+  {id:"3877440",name:"Mohammed Nadeem"},{id:"1383608",name:"Amer Shazad"},{id:"1417159",name:"Shazad Saleem"},
+  {id:"1629806",name:"Mohammed Wajid"},{id:"925713",name:"Mohammed Ali"},{id:"4516509",name:"Omar Gaber"},
+  {id:"4478518",name:"Ahmed Al Alwai"},{id:"4520599",name:"Badar Almukhaini"},{id:"4559077",name:"Sabir Albalushi"},
+  {id:"4559994",name:"Sarmad Said"},{id:"4594386",name:"Sujit Dhirendra"},{id:"4564834",name:"Feysal Alaamri"},
+  {id:"4572472",name:"Mohammed Shahid 2"},{id:"4607634",name:"Faysal Ahmed"},{id:"4602593",name:"Hamid Jadad"},
+  {id:"4611922",name:"Salah Al Hajri"},{id:"1421555",name:"Shaikh Habib"}
+];
+
+// Load riders from Google Sheet (Riders tab) — overwrites default list if exists
+async function loadRidersFromSheet() {
+  try {
+    const { sheets, spreadsheetId } = await getSheetAuth();
+    const meta = await sheets.spreadsheets.get({ spreadsheetId });
+    const existing = meta.data.sheets.map(s => s.properties.title);
+    if (!existing.includes('Riders')) {
+      // Create Riders tab and populate with default list
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: { requests: [{ addSheet: { properties: { title: 'Riders' } } }] }
+      });
+      const rows = [['Name', 'ID'], ...riders.map(r => [r.name, r.id])];
+      await sheets.spreadsheets.values.update({
+        spreadsheetId, range: 'Riders!A1',
+        valueInputOption: 'RAW',
+        requestBody: { values: rows }
+      });
+      console.log('Created Riders tab with default list');
+    } else {
+      // Load from sheet
+      const res = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Riders!A:B' });
+      const rows = res.data.values || [];
+      const loaded = rows.slice(1).filter(r => r[0] && r[1]).map(r => ({ name: r[0].trim(), id: r[1].trim() }));
+      if (loaded.length > 0) { riders = loaded; console.log(`Loaded ${riders.length} riders from sheet`); }
+    }
+  } catch (e) { console.error('loadRidersFromSheet error:', e.message); }
 }
-function saveRiders() { fs.writeFileSync(RIDERS_FILE, JSON.stringify(riders, null, 2)); }
+
+async function saveRidersToSheet() {
+  try {
+    const { sheets, spreadsheetId } = await getSheetAuth();
+    const rows = [['Name', 'ID'], ...riders.map(r => [r.name, r.id])];
+    await sheets.spreadsheets.values.update({
+      spreadsheetId, range: 'Riders!A1',
+      valueInputOption: 'RAW',
+      requestBody: { values: rows }
+    });
+  } catch (e) { console.error('saveRidersToSheet error:', e.message); }
+}
 
 // ─── Submissions store ────────────────────────────────────────────────────────
 const SUBS_FILE = path.join(__dirname, 'submissions.json');
@@ -821,18 +854,18 @@ app.get('/admin/riders', requireAdmin, (req, res) => {
 </body></html>`);
 });
 
-app.post('/admin/riders/add', requireAdmin, (req, res) => {
+app.post('/admin/riders/add', requireAdmin, async (req, res) => {
   const { name, id } = req.body;
   if (name && id && !riders.find(r => r.id === id.trim())) {
     riders.push({ id: id.trim(), name: name.trim() });
-    saveRiders();
+    await saveRidersToSheet();
   }
   res.redirect('/admin/riders');
 });
 
-app.post('/admin/riders/delete/:id', requireAdmin, (req, res) => {
+app.post('/admin/riders/delete/:id', requireAdmin, async (req, res) => {
   riders = riders.filter(r => r.id !== req.params.id);
-  saveRiders();
+  await saveRidersToSheet();
   res.redirect('/admin/riders');
 });
 
@@ -851,4 +884,8 @@ app.get('/admin/export', requireAdmin, (req, res) => {
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`COD Tracker running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`COD Tracker running on port ${PORT}`);
+  // Load riders from Google Sheet after server starts
+  getSheetAuth().then(() => loadRidersFromSheet()).catch(e => console.error('Startup sheet error:', e.message));
+});
