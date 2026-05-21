@@ -172,7 +172,12 @@ async function updateSubmissionInSheet(sub) {
   } catch(e) { console.error('updateSubmissionInSheet error:', e.message); }
 }
 
-// ─── Today's submitted IDs (for duplicate detection) ─────────────────────────
+// ─── In-memory image store (survives within session, lost on restart) ─────────
+const imageStore = {};
+function storeImages(id, bankB64, bankType, talabatB64, talabatType) {
+  imageStore[id] = { bankB64, bankType, talabatB64, talabatType };
+}
+function getImages(id) { return imageStore[id] || null; }
 function getTodayIds() {
   const today = new Date(new Date().getTime() + 4*60*60*1000).toISOString().slice(0, 10);
   return new Set(
@@ -355,13 +360,13 @@ async function fillRiderRow(submission) {
       // Rider not found — append at end
       await sheets.spreadsheets.values.append({
         spreadsheetId, range: `${sheetName}!A:H`, valueInputOption: 'RAW',
-        requestBody: { values: [['', submission.rider_name, submission.rider_id, submission.amount || '', submission.talabat_amount || '', submission.bank || '', new Date(submission.submitted_at).toLocaleTimeString(), statusText]] }
+        requestBody: { values: [['', submission.rider_name, submission.rider_id, submission.amount || '', submission.talabat_amount || '', submission.bank || '', new Date(new Date(submission.submitted_at).getTime()+4*60*60*1000).toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit",hour12:true}), statusText]] }
       });
     } else {
       // Fill rider's existing row — columns D to H (Bank Amount, Talabat, Bank, Time, Status)
       await sheets.spreadsheets.values.update({
         spreadsheetId, range: `${sheetName}!D${rowIndex}:H${rowIndex}`, valueInputOption: 'RAW',
-        requestBody: { values: [[submission.amount || '', submission.talabat_amount || '', submission.bank || '', new Date(submission.submitted_at).toLocaleTimeString(), statusText]] }
+        requestBody: { values: [[submission.amount || '', submission.talabat_amount || '', submission.bank || '', new Date(new Date(submission.submitted_at).getTime()+4*60*60*1000).toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit",hour12:true}), statusText]] }
       });
 
       // Color the row — green if on time, yellow if late
@@ -701,6 +706,8 @@ Return ONLY this JSON, no markdown:
 
     submissions.push(submission);
     saveSubmissions();
+    // Store images in memory
+    storeImages(submission.id, bankB64, bankMediaType, talabatB64, talabatMediaType);
     saveSubmissionToSheet(submission).catch(e => console.error('saveSubmissionToSheet error:', e.message));
 
     // WhatsApp alert
@@ -723,18 +730,25 @@ Return ONLY this JSON, no markdown:
 
 // ─── Receipt image endpoint ───────────────────────────────────────────────────
 app.get('/receipt/:id', requireAdmin, (req, res) => {
-  const sub = submissions.find(s => s.id === req.params.id);
-  if (!sub || !sub.image_b64) return res.status(404).send('Not found');
-  const buf = Buffer.from(sub.image_b64, 'base64');
-  res.setHeader('Content-Type', sub.image_type || 'image/jpeg');
+  const imgs = getImages(req.params.id);
+  if (!imgs || !imgs.bankB64) {
+    // Return a simple placeholder SVG
+    res.setHeader('Content-Type', 'image/svg+xml');
+    return res.send(`<svg xmlns="http://www.w3.org/2000/svg" width="56" height="56"><rect width="56" height="56" fill="#f5f5f5" rx="8"/><text x="28" y="32" text-anchor="middle" font-size="20">📄</text></svg>`);
+  }
+  const buf = Buffer.from(imgs.bankB64, 'base64');
+  res.setHeader('Content-Type', imgs.bankType || 'image/jpeg');
   res.send(buf);
 });
 
 app.get('/talabat/:id', requireAdmin, (req, res) => {
-  const sub = submissions.find(s => s.id === req.params.id);
-  if (!sub || !sub.talabat_b64) return res.status(404).send('Not found');
-  const buf = Buffer.from(sub.talabat_b64, 'base64');
-  res.setHeader('Content-Type', sub.talabat_type || 'image/jpeg');
+  const imgs = getImages(req.params.id);
+  if (!imgs || !imgs.talabatB64) {
+    res.setHeader('Content-Type', 'image/svg+xml');
+    return res.send(`<svg xmlns="http://www.w3.org/2000/svg" width="56" height="56"><rect width="56" height="56" fill="#fff3e0" rx="8"/><text x="28" y="32" text-anchor="middle" font-size="20">🛵</text></svg>`);
+  }
+  const buf = Buffer.from(imgs.talabatB64, 'base64');
+  res.setHeader('Content-Type', imgs.talabatType || 'image/jpeg');
   res.send(buf);
 });
 
@@ -824,13 +838,13 @@ app.get('/admin', requireAdmin, (req, res) => {
   const rows = todaySubs.sort((a, b) => b.submitted_at.localeCompare(a.submitted_at)).map(s => `
     <tr>
       <td>
-        ${s.image_b64 ? `<a href="/receipt/${s.id}" target="_blank"><img src="/receipt/${s.id}" style="width:48px;height:48px;object-fit:cover;border-radius:8px;border:1px solid #eee;display:block;" alt="receipt"></a>` : '<div style="width:48px;height:48px;background:#f5f5f5;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;">📄</div>'}
+        <a href="/receipt/${s.id}" target="_blank"><img src="/receipt/${s.id}" style="width:48px;height:48px;object-fit:cover;border-radius:8px;border:1px solid #eee;display:block;" alt="receipt" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2248%22 height=%2248%22><rect width=%2248%22 height=%2248%22 fill=%22%23f5f5f5%22 rx=%228%22/><text x=%2224%22 y=%2228%22 text-anchor=%22middle%22 font-size=%2218%22>📄</text></svg>'"></a>
       </td>
       <td style="font-weight:500;font-size:13px;">${s.rider_name}${s.is_late ? ' <span style="background:#fff3e0;color:#e65100;font-size:10px;padding:1px 5px;border-radius:4px;">LATE</span>' : ''}</td>
       <td style="color:#888;font-size:12px;">${s.rider_id}</td>
       <td style="font-weight:600;font-size:13px;">${s.amount ? s.amount.toLocaleString() + ' OMR' : '<span style="color:#c62828;font-size:12px;">—</span>'}</td>
       <td style="font-weight:600;color:#e65100;font-size:13px;">${s.talabat_amount ? s.talabat_amount.toLocaleString() + ' OMR' : '—'}</td>
-      <td style="font-size:12px;color:#888;">${new Date(s.submitted_at).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})}</td>
+      <td style="font-size:12px;color:#888;">${new Date(new Date(s.submitted_at).getTime() + 4*60*60*1000).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:true})}</td>
       <td>
         <span class="badge ${s.status === 'approved' ? 'ok' : s.status === 'flagged' ? 'flagged' : 'rej'}">
           ${s.status === 'approved' ? '✓' : s.status === 'flagged' ? '⚠' : '✗'} ${s.status === 'approved' ? 'OK' : s.status === 'flagged' ? 'Flag' : 'Rej'}
