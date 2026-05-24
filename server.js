@@ -172,12 +172,10 @@ async function updateSubmissionInSheet(sub) {
   } catch(e) { console.error('updateSubmissionInSheet error:', e.message); }
 }
 
-// ─── In-memory image store (survives within session, lost on restart) ─────────
+// ─── In-memory image store ────────────────────────────────────────────────────
 const imageStore = {};
-function storeImages(id, bankB64, bankType, talabatB64, talabatType) {
-  imageStore[id] = { bankB64, bankType, talabatB64, talabatType };
-}
-function getImages(id) { return imageStore[id] || null; }
+
+
 function getTodayIds() {
   const today = new Date(new Date().getTime() + 4*60*60*1000).toISOString().slice(0, 10);
   return new Set(
@@ -706,8 +704,13 @@ Return ONLY this JSON, no markdown:
 
     submissions.push(submission);
     saveSubmissions();
-    // Store images in memory
-    storeImages(submission.id, bankB64, bankMediaType, talabatB64, talabatMediaType);
+
+    // Store images in memory for same-day viewing
+    imageStore[submission.id] = {
+      bankB64, bankMediaType,
+      talabatB64, talabatMediaType
+    };
+
     saveSubmissionToSheet(submission).catch(e => console.error('saveSubmissionToSheet error:', e.message));
 
     // WhatsApp alert
@@ -730,26 +733,23 @@ Return ONLY this JSON, no markdown:
 
 // ─── Receipt image endpoint ───────────────────────────────────────────────────
 app.get('/receipt/:id', requireAdmin, (req, res) => {
-  const imgs = getImages(req.params.id);
-  if (!imgs || !imgs.bankB64) {
-    // Return a simple placeholder SVG
-    res.setHeader('Content-Type', 'image/svg+xml');
-    return res.send(`<svg xmlns="http://www.w3.org/2000/svg" width="56" height="56"><rect width="56" height="56" fill="#f5f5f5" rx="8"/><text x="28" y="32" text-anchor="middle" font-size="20">📄</text></svg>`);
+  const imgs = imageStore[req.params.id];
+  if (imgs && imgs.bankB64) {
+    res.setHeader('Content-Type', imgs.bankMediaType || 'image/jpeg');
+    return res.send(Buffer.from(imgs.bankB64, 'base64'));
   }
-  const buf = Buffer.from(imgs.bankB64, 'base64');
-  res.setHeader('Content-Type', imgs.bankType || 'image/jpeg');
-  res.send(buf);
+  res.setHeader('Content-Type', 'image/svg+xml');
+  res.send(`<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"><rect width="200" height="200" fill="#f5f5f5" rx="12"/><text x="100" y="90" text-anchor="middle" font-size="40">📄</text><text x="100" y="130" text-anchor="middle" font-size="13" fill="#999">Image not available</text><text x="100" y="150" text-anchor="middle" font-size="11" fill="#bbb">(server restarted)</text></svg>`);
 });
 
 app.get('/talabat/:id', requireAdmin, (req, res) => {
-  const imgs = getImages(req.params.id);
-  if (!imgs || !imgs.talabatB64) {
-    res.setHeader('Content-Type', 'image/svg+xml');
-    return res.send(`<svg xmlns="http://www.w3.org/2000/svg" width="56" height="56"><rect width="56" height="56" fill="#fff3e0" rx="8"/><text x="28" y="32" text-anchor="middle" font-size="20">🛵</text></svg>`);
+  const imgs = imageStore[req.params.id];
+  if (imgs && imgs.talabatB64) {
+    res.setHeader('Content-Type', imgs.talabatMediaType || 'image/jpeg');
+    return res.send(Buffer.from(imgs.talabatB64, 'base64'));
   }
-  const buf = Buffer.from(imgs.talabatB64, 'base64');
-  res.setHeader('Content-Type', imgs.talabatType || 'image/jpeg');
-  res.send(buf);
+  res.setHeader('Content-Type', 'image/svg+xml');
+  res.send(`<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"><rect width="200" height="200" fill="#fff3e0" rx="12"/><text x="100" y="90" text-anchor="middle" font-size="40">🛵</text><text x="100" y="130" text-anchor="middle" font-size="13" fill="#999">Image not available</text><text x="100" y="150" text-anchor="middle" font-size="11" fill="#bbb">(server restarted)</text></svg>`);
 });
 
 
@@ -838,7 +838,9 @@ app.get('/admin', requireAdmin, (req, res) => {
   const rows = todaySubs.sort((a, b) => b.submitted_at.localeCompare(a.submitted_at)).map(s => `
     <tr>
       <td>
-        <a href="/receipt/${s.id}" target="_blank"><img src="/receipt/${s.id}" style="width:48px;height:48px;object-fit:cover;border-radius:8px;border:1px solid #eee;display:block;" alt="receipt" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2248%22 height=%2248%22><rect width=%2248%22 height=%2248%22 fill=%22%23f5f5f5%22 rx=%228%22/><text x=%2224%22 y=%2228%22 text-anchor=%22middle%22 font-size=%2218%22>📄</text></svg>'"></a>
+        <a href="/receipt/${s.id}" target="_blank">
+          <img src="/receipt/${s.id}" style="width:48px;height:48px;object-fit:cover;border-radius:8px;border:1px solid #eee;display:block;" alt="receipt">
+        </a>
       </td>
       <td style="font-weight:500;font-size:13px;">${s.rider_name}${s.is_late ? ' <span style="background:#fff3e0;color:#e65100;font-size:10px;padding:1px 5px;border-radius:4px;">LATE</span>' : ''}</td>
       <td style="color:#888;font-size:12px;">${s.rider_id}</td>
