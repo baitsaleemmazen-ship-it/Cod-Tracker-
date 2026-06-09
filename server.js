@@ -6,6 +6,30 @@ const { google } = require('googleapis');
 const Anthropic = require('@anthropic-ai/sdk');
 const fs = require('fs');
 const path = require('path');
+const cloudinary = require('cloudinary').v2;
+
+// ─── Cloudinary config ────────────────────────────────────────────────────────
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
+});
+
+async function uploadToCloudinary(b64, mediaType, folder, publicId) {
+  try {
+    const dataUri = `data:${mediaType};base64,${b64}`;
+    const result = await cloudinary.uploader.upload(dataUri, {
+      folder: `cod-receipts/${folder}`,
+      public_id: publicId,
+      overwrite: true,
+      resource_type: 'image'
+    });
+    return result.secure_url;
+  } catch(e) {
+    console.error('Cloudinary upload error:', e.message);
+    return null;
+  }
+}
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
@@ -705,11 +729,21 @@ Return ONLY this JSON, no markdown:
     submissions.push(submission);
     saveSubmissions();
 
-    // Store images in memory for same-day viewing
-    imageStore[submission.id] = {
-      bankB64, bankMediaType,
-      talabatB64, talabatMediaType
-    };
+    // Store in memory for instant display
+    imageStore[submission.id] = { bankB64, bankMediaType, talabatB64, talabatMediaType };
+
+    // Upload to Cloudinary in background for permanent storage
+    const safeId = submission.id;
+    const dateFolder = today;
+    Promise.all([
+      uploadToCloudinary(bankB64, bankMediaType, dateFolder, `${safeId}_bank`),
+      uploadToCloudinary(talabatB64, talabatMediaType, dateFolder, `${safeId}_talabat`)
+    ]).then(([bankUrl, talabatUrl]) => {
+      if (bankUrl) { submission.bank_url = bankUrl; }
+      if (talabatUrl) { submission.talabat_url = talabatUrl; }
+      saveSubmissions();
+      console.log(`Cloudinary uploaded for ${submission.rider_name}`);
+    }).catch(e => console.error('Cloudinary error:', e.message));
 
     saveSubmissionToSheet(submission).catch(e => console.error('saveSubmissionToSheet error:', e.message));
 
@@ -733,23 +767,27 @@ Return ONLY this JSON, no markdown:
 
 // ─── Receipt image endpoint ───────────────────────────────────────────────────
 app.get('/receipt/:id', requireAdmin, (req, res) => {
+  const sub = submissions.find(s => s.id === req.params.id);
+  if (sub && sub.bank_url) return res.redirect(sub.bank_url);
   const imgs = imageStore[req.params.id];
   if (imgs && imgs.bankB64) {
     res.setHeader('Content-Type', imgs.bankMediaType || 'image/jpeg');
     return res.send(Buffer.from(imgs.bankB64, 'base64'));
   }
   res.setHeader('Content-Type', 'image/svg+xml');
-  res.send(`<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"><rect width="200" height="200" fill="#f5f5f5" rx="12"/><text x="100" y="90" text-anchor="middle" font-size="40">📄</text><text x="100" y="130" text-anchor="middle" font-size="13" fill="#999">Image not available</text><text x="100" y="150" text-anchor="middle" font-size="11" fill="#bbb">(server restarted)</text></svg>`);
+  res.send(`<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"><rect width="200" height="200" fill="#f5f5f5" rx="12"/><text x="100" y="90" text-anchor="middle" font-size="40">📄</text><text x="100" y="130" text-anchor="middle" font-size="13" fill="#999">Image not available</text></svg>`);
 });
 
 app.get('/talabat/:id', requireAdmin, (req, res) => {
+  const sub = submissions.find(s => s.id === req.params.id);
+  if (sub && sub.talabat_url) return res.redirect(sub.talabat_url);
   const imgs = imageStore[req.params.id];
   if (imgs && imgs.talabatB64) {
     res.setHeader('Content-Type', imgs.talabatMediaType || 'image/jpeg');
     return res.send(Buffer.from(imgs.talabatB64, 'base64'));
   }
   res.setHeader('Content-Type', 'image/svg+xml');
-  res.send(`<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"><rect width="200" height="200" fill="#fff3e0" rx="12"/><text x="100" y="90" text-anchor="middle" font-size="40">🛵</text><text x="100" y="130" text-anchor="middle" font-size="13" fill="#999">Image not available</text><text x="100" y="150" text-anchor="middle" font-size="11" fill="#bbb">(server restarted)</text></svg>`);
+  res.send(`<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"><rect width="200" height="200" fill="#fff3e0" rx="12"/><text x="100" y="90" text-anchor="middle" font-size="40">🛵</text><text x="100" y="130" text-anchor="middle" font-size="13" fill="#999">Image not available</text></svg>`);
 });
 
 
@@ -828,18 +866,20 @@ scheduleDailySummary();
 // ══════════════════════════════════════════════════════════════════════════════
 app.get('/admin', requireAdmin, (req, res) => {
   const today = new Date(new Date().getTime() + 4*60*60*1000).toISOString().slice(0,10);
-  const todaySubs = submissions.filter(s => s.date === today);
+  const selectedDate = req.query.date || today;
+  const isToday = selectedDate === today;
+  const todaySubs = submissions.filter(s => s.date === selectedDate);
   const approved = todaySubs.filter(s => s.status === 'approved');
   const flagged = todaySubs.filter(s => s.status === 'flagged');
   const totalAmt = approved.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
   const submittedIds = new Set(todaySubs.map(s => s.rider_id));
-  const pendingRiders = riders.filter(r => !submittedIds.has(r.id));
+  const pendingRiders = isToday ? riders.filter(r => !submittedIds.has(r.id)) : [];
 
   const rows = todaySubs.sort((a, b) => b.submitted_at.localeCompare(a.submitted_at)).map(s => `
     <tr>
       <td>
         <a href="/receipt/${s.id}" target="_blank">
-          <img src="/receipt/${s.id}" style="width:48px;height:48px;object-fit:cover;border-radius:8px;border:1px solid #eee;display:block;" alt="receipt">
+          <img src="${s.bank_url || `/receipt/${s.id}`}" style="width:48px;height:48px;object-fit:cover;border-radius:8px;border:1px solid #eee;display:block;" alt="receipt" onerror="this.style.display='none';this.parentElement.innerHTML='<div style=width:48px;height:48px;background:#f5f5f5;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:20px>📄</div>'">
         </a>
       </td>
       <td style="font-weight:500;font-size:13px;">${s.rider_name}${s.is_late ? ' <span style="background:#fff3e0;color:#e65100;font-size:10px;padding:1px 5px;border-radius:4px;">LATE</span>' : ''}</td>
@@ -932,8 +972,12 @@ document.addEventListener('DOMContentLoaded', () => {
 </script>
 </head><body>
 <div class="topbar">
-  <h1>📦 COD</h1>
+  <h1>📦 COD${isToday ? '' : ` — ${selectedDate}`}</h1>
   <div class="topbar-links">
+    <form method="GET" action="/admin" style="margin:0;display:flex;gap:6px;align-items:center;">
+      <input type="date" name="date" value="${selectedDate}" max="${today}" style="font-size:12px;padding:4px 8px;border:1px solid #ddd;border-radius:8px;">
+      <button type="submit" style="font-size:12px;padding:5px 10px;background:#1a73e8;color:#fff;border:none;border-radius:8px;cursor:pointer;">Go</button>
+    </form>
     <a href="/admin/riders">👥 Riders</a>
     <a href="/admin/export">⬇️ CSV</a>
     <a href="/admin/logout">🚪</a>
