@@ -22,7 +22,9 @@ async function uploadToCloudinary(b64, mediaType, folder, publicId) {
       folder: `cod-receipts/${folder}`,
       public_id: publicId,
       overwrite: true,
-      resource_type: 'image'
+      resource_type: 'image',
+      invalidate: true,
+      expires_at: Math.floor(Date.now() / 1000) + (30 * 24 * 60 * 60) // 30 days
     });
     return result.secure_url;
   } catch(e) {
