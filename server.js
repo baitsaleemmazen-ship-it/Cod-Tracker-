@@ -698,6 +698,29 @@ Return ONLY this JSON, no markdown:
       status = 'flagged';
     }
 
+    // Discrepancy check — bank amount vs Talabat collected differ by more than 1 OMR
+    if (aiResult.amount && talabatResult.collected_amount) {
+      const diff = Math.abs(aiResult.amount - talabatResult.collected_amount);
+      if (diff > 1) {
+        flags.push(`⚠️ Amount mismatch: Bank ${aiResult.amount} OMR vs Talabat ${talabatResult.collected_amount} OMR (difference: ${diff.toFixed(3)} OMR)`);
+        status = 'flagged';
+      }
+    }
+
+    // Duplicate receipt detection — check if same bank amount + same date already submitted today
+    if (aiResult.amount) {
+      const todayDuplicateReceipt = submissions.find(s =>
+        s.date === today &&
+        s.rider_id !== rider_id &&
+        s.amount === aiResult.amount &&
+        s.bank === (aiResult.bank_name || 'Bank')
+      );
+      if (todayDuplicateReceipt) {
+        flags.push(`⚠️ Same amount (${aiResult.amount} OMR) already submitted by ${todayDuplicateReceipt.rider_name} today — possible duplicate receipt`);
+        status = 'flagged';
+      }
+    }
+
     // Soft flag only (still approved): amount not detected — admin enters manually
     const needsAmount = !aiResult.amount;
 
@@ -863,8 +886,166 @@ function scheduleDailySummary() {
 }
 scheduleDailySummary();
 
+// ─── Weekly fuel sheet — every Sunday at 8 PM GMT+4 ──────────────────────────
+async function generateFuelSheet() {
+  try {
+    const { sheets, spreadsheetId } = await getSheetAuth();
+    const now = new Date(new Date().getTime() + 4*60*60*1000);
+
+    // Week: Monday to Sunday (current week ending today)
+    const sunday = new Date(now);
+    const monday = new Date(now);
+    monday.setDate(sunday.getDate() - 6);
+
+    const weekStart = monday.toISOString().slice(0,10);
+    const weekEnd = sunday.toISOString().slice(0,10);
+    const tabName = `Fuel ${weekStart} to ${weekEnd}`;
+
+    // Collect deliveries per rider from submissions this week
+    const weekSubs = submissions.filter(s => s.date >= weekStart && s.date <= weekEnd && s.status === 'approved');
+
+    // Sum deliveries per rider
+    const riderDeliveries = {};
+    weekSubs.forEach(s => {
+      if (!riderDeliveries[s.rider_id]) {
+        riderDeliveries[s.rider_id] = { name: s.rider_name, id: s.rider_id, deliveries: 0 };
+      }
+      riderDeliveries[s.rider_id].deliveries += (parseInt(s.talabat_deliveries) || 0);
+    });
+
+    // Build rows for all riders
+    const riderRows = riders.map((r, i) => {
+      const data = riderDeliveries[r.id];
+      const deliveries = data ? data.deliveries : 0;
+      const fuel = deliveries === 0 ? 0 : deliveries >= 75 ? (deliveries > 75 ? 30 : 25) : 0;
+      return [i + 1, r.name, r.id, deliveries, fuel];
+    });
+
+    // Create sheet tab
+    const meta = await sheets.spreadsheets.get({ spreadsheetId });
+    const existing = meta.data.sheets.map(s => s.properties.title);
+    if (existing.includes(tabName)) return; // already generated
+
+    const addRes = await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: { requests: [{ addSheet: { properties: { title: tabName } } }] }
+    });
+    const sheetId = addRes.data.replies[0].addSheet.properties.sheetId;
+    const COLS = 5;
+    const totalRows = riders.length + 3;
+
+    // Write data
+    await sheets.spreadsheets.values.update({
+      spreadsheetId, range: `${tabName}!A1`, valueInputOption: 'RAW',
+      requestBody: { values: [
+        ['Future Wave', '', '', '', ''],
+        [`Fuel Allowance — ${weekStart} to ${weekEnd}`, '', '', '', ''],
+        ['#', 'Rider Name', 'Rider ID', 'Total Orders', 'Fuel (OMR)'],
+        ...riderRows
+      ]}
+    });
+
+    // Formatting
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: { requests: [
+        // Merge title rows
+        { mergeCells: { range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: COLS }, mergeType: 'MERGE_ALL' } },
+        { mergeCells: { range: { sheetId, startRowIndex: 1, endRowIndex: 2, startColumnIndex: 0, endColumnIndex: COLS }, mergeType: 'MERGE_ALL' } },
+
+        // Company name row — dark green
+        { repeatCell: { range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: COLS },
+          cell: { userEnteredFormat: { backgroundColor: { red: 0.067, green: 0.31, blue: 0.165 }, horizontalAlignment: 'CENTER',
+            textFormat: { foregroundColor: { red: 1, green: 1, blue: 1 }, bold: true, fontSize: 16 } } }, fields: 'userEnteredFormat' }},
+
+        // Date row — light green
+        { repeatCell: { range: { sheetId, startRowIndex: 1, endRowIndex: 2, startColumnIndex: 0, endColumnIndex: COLS },
+          cell: { userEnteredFormat: { backgroundColor: { red: 0.851, green: 0.918, blue: 0.863 }, horizontalAlignment: 'CENTER',
+            textFormat: { foregroundColor: { red: 0.067, green: 0.31, blue: 0.165 }, bold: true, fontSize: 12 } } }, fields: 'userEnteredFormat' }},
+
+        // Header row — dark green
+        { repeatCell: { range: { sheetId, startRowIndex: 2, endRowIndex: 3, startColumnIndex: 0, endColumnIndex: COLS },
+          cell: { userEnteredFormat: { backgroundColor: { red: 0.067, green: 0.31, blue: 0.165 }, horizontalAlignment: 'CENTER',
+            textFormat: { foregroundColor: { red: 1, green: 1, blue: 1 }, bold: true, fontSize: 11 } } }, fields: 'userEnteredFormat' }},
+
+        // Data rows — alternating white/grey
+        ...riders.map((_, i) => ({
+          repeatCell: {
+            range: { sheetId, startRowIndex: 3 + i, endRowIndex: 4 + i, startColumnIndex: 0, endColumnIndex: COLS },
+            cell: { userEnteredFormat: {
+              backgroundColor: i % 2 === 0 ? { red: 1, green: 1, blue: 1 } : { red: 0.949, green: 0.949, blue: 0.949 },
+              horizontalAlignment: 'CENTER', textFormat: { fontSize: 10 }
+            }}, fields: 'userEnteredFormat'
+          }
+        })),
+
+        // Fuel column (E) — highlight non-zero in green
+        ...riderRows.map((row, i) => row[4] > 0 ? ({
+          repeatCell: {
+            range: { sheetId, startRowIndex: 3 + i, endRowIndex: 4 + i, startColumnIndex: 4, endColumnIndex: 5 },
+            cell: { userEnteredFormat: {
+              backgroundColor: { red: 0.714, green: 0.918, blue: 0.757 },
+              textFormat: { bold: true, foregroundColor: { red: 0.067, green: 0.31, blue: 0.165 } }
+            }}, fields: 'userEnteredFormat'
+          }
+        }) : null).filter(Boolean),
+
+        // Row heights
+        { updateDimensionProperties: { range: { sheetId, dimension: 'ROWS', startIndex: 0, endIndex: 1 }, properties: { pixelSize: 45 }, fields: 'pixelSize' } },
+        { updateDimensionProperties: { range: { sheetId, dimension: 'ROWS', startIndex: 1, endIndex: 2 }, properties: { pixelSize: 30 }, fields: 'pixelSize' } },
+        { updateDimensionProperties: { range: { sheetId, dimension: 'ROWS', startIndex: 2, endIndex: 3 }, properties: { pixelSize: 30 }, fields: 'pixelSize' } },
+        { updateDimensionProperties: { range: { sheetId, dimension: 'ROWS', startIndex: 3, endIndex: totalRows }, properties: { pixelSize: 25 }, fields: 'pixelSize' } },
+
+        // Column widths
+        { updateDimensionProperties: { range: { sheetId, dimension: 'COLUMNS', startIndex: 0, endIndex: 1 }, properties: { pixelSize: 40 }, fields: 'pixelSize' } },
+        { updateDimensionProperties: { range: { sheetId, dimension: 'COLUMNS', startIndex: 1, endIndex: 2 }, properties: { pixelSize: 180 }, fields: 'pixelSize' } },
+        { updateDimensionProperties: { range: { sheetId, dimension: 'COLUMNS', startIndex: 2, endIndex: 3 }, properties: { pixelSize: 100 }, fields: 'pixelSize' } },
+        { updateDimensionProperties: { range: { sheetId, dimension: 'COLUMNS', startIndex: 3, endIndex: 4 }, properties: { pixelSize: 120 }, fields: 'pixelSize' } },
+        { updateDimensionProperties: { range: { sheetId, dimension: 'COLUMNS', startIndex: 4, endIndex: 5 }, properties: { pixelSize: 120 }, fields: 'pixelSize' } },
+
+        // Borders
+        { updateBorders: { range: { sheetId, startRowIndex: 2, endRowIndex: totalRows, startColumnIndex: 0, endColumnIndex: COLS },
+          top: { style: 'SOLID', width: 2, color: { red: 0.067, green: 0.31, blue: 0.165 } },
+          bottom: { style: 'SOLID', width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } },
+          left: { style: 'SOLID', width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } },
+          right: { style: 'SOLID', width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } },
+          innerHorizontal: { style: 'SOLID', width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } },
+          innerVertical: { style: 'SOLID', width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }
+        }}
+      ]}
+    });
+
+    console.log(`Fuel sheet generated: ${tabName}`);
+  } catch(e) { console.error('generateFuelSheet error:', e.message); }
+}
+
+function scheduleWeeklyFuel() {
+  const now = new Date();
+  const gmt4 = new Date(now.getTime() + 4*60*60*1000);
+  const next = new Date(gmt4);
+  // Find next Sunday at 8 PM
+  const dayOfWeek = gmt4.getDay(); // 0=Sun
+  const daysUntilSunday = dayOfWeek === 0 ? 0 : 7 - dayOfWeek;
+  next.setDate(gmt4.getDate() + daysUntilSunday);
+  next.setHours(20, 0, 0, 0);
+  if (gmt4 >= next) next.setDate(next.getDate() + 7);
+  const msUntil = next - gmt4;
+  setTimeout(async () => {
+    await generateFuelSheet();
+    scheduleWeeklyFuel();
+  }, msUntil);
+  console.log(`Fuel sheet scheduled for: ${next.toISOString()}`);
+}
+scheduleWeeklyFuel();
+
+app.post('/admin/generate-fuel', requireAdmin, async (req, res) => {
+  generateFuelSheet().catch(e => console.error('Fuel sheet error:', e.message));
+  res.redirect('/admin?fuel=generating');
+});
+
 // ══════════════════════════════════════════════════════════════════════════════
 // ADMIN — dashboard
+
 // ══════════════════════════════════════════════════════════════════════════════
 app.get('/admin', requireAdmin, (req, res) => {
   const today = new Date(new Date().getTime() + 4*60*60*1000).toISOString().slice(0,10);
@@ -982,6 +1163,7 @@ document.addEventListener('DOMContentLoaded', () => {
     </form>
     <a href="/admin/riders">👥 Riders</a>
     <a href="/admin/export">⬇️ CSV</a>
+    <form method="POST" action="/admin/generate-fuel" style="margin:0;"><button type="submit" style="font-size:12px;padding:5px 10px;background:#e65100;color:#fff;border:none;border-radius:8px;cursor:pointer;">⛽ Fuel</button></form>
     <a href="/admin/logout">🚪</a>
   </div>
 </div>
