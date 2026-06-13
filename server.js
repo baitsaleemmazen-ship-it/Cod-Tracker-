@@ -7,6 +7,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const fs = require('fs');
 const path = require('path');
 const cloudinary = require('cloudinary').v2;
+const XLSX = require('xlsx');
 
 // ─── Cloudinary config ────────────────────────────────────────────────────────
 cloudinary.config({
@@ -752,24 +753,20 @@ Return ONLY this JSON, no markdown:
     };
 
     submissions.push(submission);
-    saveSubmissions();
 
     // Store in memory for instant display
     imageStore[submission.id] = { bankB64, bankMediaType, talabatB64, talabatMediaType };
 
-    // Upload to Cloudinary in background for permanent storage
-    const safeId = submission.id;
-    const dateFolder = today;
-    Promise.all([
-      uploadToCloudinary(bankB64, bankMediaType, dateFolder, `${safeId}_bank`),
-      uploadToCloudinary(talabatB64, talabatMediaType, dateFolder, `${safeId}_talabat`)
-    ]).then(([bankUrl, talabatUrl]) => {
-      if (bankUrl) { submission.bank_url = bankUrl; }
-      if (talabatUrl) { submission.talabat_url = talabatUrl; }
-      saveSubmissions();
-      console.log(`Cloudinary uploaded for ${submission.rider_name}`);
-    }).catch(e => console.error('Cloudinary error:', e.message));
+    // Upload to Cloudinary synchronously — ensures images available immediately in admin
+    const riderSafeName = (riderObj.name || 'unknown').replace(/[^a-zA-Z0-9]/g, '_');
+    const [bankUrl, talabatUrl] = await Promise.all([
+      uploadToCloudinary(bankB64, bankMediaType, today, `${submission.id}_${riderSafeName}_bank`),
+      uploadToCloudinary(talabatB64, talabatMediaType, today, `${submission.id}_${riderSafeName}_talabat`)
+    ]);
+    if (bankUrl) submission.bank_url = bankUrl;
+    if (talabatUrl) submission.talabat_url = talabatUrl;
 
+    saveSubmissions();
     saveSubmissionToSheet(submission).catch(e => console.error('saveSubmissionToSheet error:', e.message));
 
     // WhatsApp alert
@@ -1163,7 +1160,7 @@ document.addEventListener('DOMContentLoaded', () => {
     </form>
     <a href="/admin/riders">👥 Riders</a>
     <a href="/admin/export">⬇️ CSV</a>
-    <form method="POST" action="/admin/generate-fuel" style="margin:0;"><button type="submit" style="font-size:12px;padding:5px 10px;background:#e65100;color:#fff;border:none;border-radius:8px;cursor:pointer;">⛽ Fuel</button></form>
+    <a href="/admin/fuel-upload">⛽ Fuel</a>
     <a href="/admin/logout">🚪</a>
   </div>
 </div>
@@ -1344,7 +1341,224 @@ app.get('/admin/export', requireAdmin, (req, res) => {
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────
-const PORT = process.env.PORT || 3000;
+// ─── Fuel data storage (Google Sheet tab: FuelData) ──────────────────────────
+async function saveFuelDataToSheet(weekLabel, rows) {
+  try {
+    const { sheets, spreadsheetId } = await getSheetAuth();
+    const meta = await sheets.spreadsheets.get({ spreadsheetId });
+    const existing = meta.data.sheets.map(s => s.properties.title);
+
+    if (!existing.includes('FuelData')) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: { requests: [{ addSheet: { properties: { title: 'FuelData' } } }] }
+      });
+      await sheets.spreadsheets.values.update({
+        spreadsheetId, range: 'FuelData!A1',
+        valueInputOption: 'RAW',
+        requestBody: { values: [['Week', 'Rider ID', 'Rider Name', 'Fuel Amount (OMR)', 'Uploaded At']] }
+      });
+    }
+
+    // Remove existing entries for this week first
+    const res = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'FuelData!A:A' });
+    const allWeeks = (res.data.values || []).map(r => r[0]);
+    const toDelete = [];
+    allWeeks.forEach((w, i) => { if (w === weekLabel) toDelete.push(i + 1); });
+    // Clear existing week rows (replace with empty)
+    for (const rowNum of toDelete.reverse()) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId, range: `FuelData!A${rowNum}:E${rowNum}`,
+        valueInputOption: 'RAW', requestBody: { values: [['', '', '', '', '']] }
+      });
+    }
+
+    // Append new rows
+    const uploadedAt = new Date(new Date().getTime() + 4*60*60*1000).toLocaleString('en-US');
+    const newRows = rows.map(r => [weekLabel, r.id, r.name, r.amount, uploadedAt]);
+    await sheets.spreadsheets.values.append({
+      spreadsheetId, range: 'FuelData!A:E',
+      valueInputOption: 'RAW',
+      requestBody: { values: newRows }
+    });
+    return true;
+  } catch(e) { console.error('saveFuelDataToSheet error:', e.message); return false; }
+}
+
+async function getFuelData(riderId) {
+  try {
+    const { sheets, spreadsheetId } = await getSheetAuth();
+    const res = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'FuelData!A:E' });
+    const rows = (res.data.values || []).slice(1);
+    const riderRows = rows.filter(r => r[1] && r[1].toString().trim() === riderId.toString().trim() && r[0]);
+    return riderRows.map(r => ({ week: r[0], rider_id: r[1], rider_name: r[2], amount: r[3] }));
+  } catch(e) { console.error('getFuelData error:', e.message); return []; }
+}
+
+// ─── Admin fuel upload page ───────────────────────────────────────────────────
+app.get('/admin/fuel-upload', requireAdmin, (req, res) => {
+  res.send(`<!DOCTYPE html><html><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Upload Fuel Sheet</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:-apple-system,sans-serif;background:#f5f5f5;padding:1.5rem;}
+  .card{background:#fff;border-radius:16px;padding:1.5rem;max-width:500px;margin:0 auto;box-shadow:0 2px 16px rgba(0,0,0,0.08);}
+  h1{font-size:18px;font-weight:600;margin-bottom:4px;}
+  .sub{font-size:13px;color:#888;margin-bottom:1.5rem;}
+  label{font-size:13px;font-weight:500;color:#444;display:block;margin-bottom:4px;}
+  input[type=text],input[type=file]{width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:10px;font-size:14px;margin-bottom:1rem;background:#fafafa;}
+  button{width:100%;padding:12px;background:#e65100;color:#fff;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;}
+  .back{display:block;text-align:center;margin-top:1rem;font-size:13px;color:#1a73e8;text-decoration:none;}
+  .info{background:#e8f0fe;border-radius:10px;padding:12px;font-size:12px;color:#1a73e8;margin-bottom:1rem;line-height:1.6;}
+  .msg{padding:12px;border-radius:10px;font-size:13px;margin-top:1rem;}
+  .msg.ok{background:#e6f4ea;color:#1e7e34;}
+  .msg.err{background:#fce8e6;color:#c62828;}
+</style></head><body>
+<div class="card">
+  <h1>⛽ Upload Fuel Sheet</h1>
+  <p class="sub">Upload the weekly Excel file to update rider fuel amounts</p>
+  <div class="info">
+    📋 Excel file must have these columns:<br>
+    <strong>Column A:</strong> Rider ID<br>
+    <strong>Column B:</strong> Rider Name<br>
+    <strong>Column C:</strong> Fuel Amount (OMR)<br>
+    First row = headers (will be skipped)
+  </div>
+  <form method="POST" action="/admin/fuel-upload" enctype="multipart/form-data">
+    <label>Week label (e.g. 19-05 to 25-05)</label>
+    <input type="text" name="week_label" placeholder="e.g. 19-05-2026 to 25-05-2026" required>
+    <label>Excel file (.xlsx)</label>
+    <input type="file" name="fuel_file" accept=".xlsx" required>
+    <button type="submit">⬆️ Upload & Save</button>
+  </form>
+  ${req.query.success ? '<div class="msg ok">✅ Fuel data uploaded successfully!</div>' : ''}
+  ${req.query.error ? '<div class="msg err">❌ Error: ' + req.query.error + '</div>' : ''}
+  <a href="/admin" class="back">← Back to dashboard</a>
+</div>
+</body></html>`);
+});
+
+const uploadFuel = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+app.post('/admin/fuel-upload', requireAdmin, uploadFuel.single('fuel_file'), async (req, res) => {
+  try {
+    const weekLabel = req.body.week_label;
+    if (!req.file) return res.redirect('/admin/fuel-upload?error=No+file+uploaded');
+    if (!weekLabel) return res.redirect('/admin/fuel-upload?error=No+week+label');
+
+    // Parse Excel
+    const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const data = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+
+    // Skip header row, extract ID, Name, Amount
+    const rows = data.slice(1).filter(r => r[0] && r[2]).map(r => ({
+      id: r[0].toString().trim(),
+      name: (r[1] || '').toString().trim(),
+      amount: parseFloat(r[2]) || 0
+    }));
+
+    if (rows.length === 0) return res.redirect('/admin/fuel-upload?error=No+valid+data+found+in+file');
+
+    const saved = await saveFuelDataToSheet(weekLabel, rows);
+    if (saved) res.redirect('/admin/fuel-upload?success=1');
+    else res.redirect('/admin/fuel-upload?error=Failed+to+save+to+sheet');
+  } catch(e) {
+    console.error('Fuel upload error:', e.message);
+    res.redirect('/admin/fuel-upload?error=' + encodeURIComponent(e.message));
+  }
+});
+
+
+app.get('/fuel', (req, res) => {
+  res.send(`<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fuel Allowance</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:1rem;}
+  .card{background:#fff;border-radius:16px;padding:1.5rem;width:100%;max-width:420px;box-shadow:0 2px 16px rgba(0,0,0,0.08);}
+  h1{font-size:20px;font-weight:600;margin-bottom:4px;}
+  .sub{font-size:13px;color:#888;margin-bottom:1.5rem;}
+  label{font-size:13px;font-weight:500;color:#444;display:block;margin-bottom:6px;}
+  input{width:100%;padding:12px;border:1px solid #ddd;border-radius:10px;font-size:16px;margin-bottom:1rem;background:#fafafa;}
+  button{width:100%;padding:12px;background:#1a73e8;color:#fff;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;}
+  .msg{padding:12px;border-radius:10px;font-size:13px;text-align:center;margin-top:1rem;}
+  .msg.err{background:#fce8e6;color:#c62828;}
+  .spinner{display:none;text-align:center;padding:1rem;color:#888;font-size:13px;}
+  .results{margin-top:1.25rem;}
+  .rider-name{font-size:18px;font-weight:600;margin-bottom:1rem;color:#1a73e8;}
+  .week-card{background:#f9f9f9;border:1px solid #eee;border-radius:12px;padding:1rem;margin-bottom:0.75rem;display:flex;justify-content:space-between;align-items:center;}
+  .week-label{font-size:13px;color:#666;}
+  .week-amount{font-size:20px;font-weight:700;color:#1e7e34;}
+  .week-amount.zero{color:#aaa;font-size:16px;}
+  .total-card{background:#1a73e8;border-radius:12px;padding:1rem;text-align:center;margin-top:1rem;}
+  .total-label{font-size:13px;color:rgba(255,255,255,0.8);}
+  .total-amount{font-size:28px;font-weight:700;color:#fff;margin-top:4px;}
+</style></head><body>
+<div class="card">
+  <h1>⛽ Fuel Allowance</h1>
+  <p class="sub">Enter your ID to check your fuel balance</p>
+  <div id="formWrap">
+    <label>Your ID number</label>
+    <input type="number" id="riderIdInput" placeholder="Enter your rider ID" inputmode="numeric">
+    <button onclick="checkFuel()">Check my fuel</button>
+  </div>
+  <div class="spinner" id="spinner">⏳ Loading...</div>
+  <div id="msg"></div>
+  <div id="results" class="results" style="display:none;"></div>
+</div>
+<script>
+async function checkFuel() {
+  const id = document.getElementById('riderIdInput').value.trim();
+  if (!id) { showMsg('Please enter your ID number.'); return; }
+  document.getElementById('spinner').style.display = 'block';
+  document.getElementById('msg').innerHTML = '';
+  document.getElementById('results').style.display = 'none';
+  try {
+    const res = await fetch('/fuel/check?id=' + encodeURIComponent(id));
+    const data = await res.json();
+    document.getElementById('spinner').style.display = 'none';
+    if (!data.ok) { showMsg(data.error || 'No fuel data found for this ID.'); return; }
+    renderResults(data);
+  } catch(e) {
+    document.getElementById('spinner').style.display = 'none';
+    showMsg('Network error. Please try again.');
+  }
+}
+function renderResults(data) {
+  const total = data.weeks.reduce((s, w) => s + (parseFloat(w.amount) || 0), 0);
+  const weeksHtml = data.weeks.map(w => \`
+    <div class="week-card">
+      <div><div class="week-label">📅 \${w.week}</div></div>
+      <div class="\${parseFloat(w.amount) > 0 ? 'week-amount' : 'week-amount zero'}">\${parseFloat(w.amount) > 0 ? w.amount + ' OMR' : '—'}</div>
+    </div>
+  \`).join('');
+  document.getElementById('results').innerHTML = \`
+    <div class="rider-name">👤 \${data.rider_name}</div>
+    \${weeksHtml}
+    \${data.weeks.length > 1 ? \`<div class="total-card"><div class="total-label">Total fuel allowance</div><div class="total-amount">\${total.toFixed(3)} OMR</div></div>\` : ''}
+  \`;
+  document.getElementById('results').style.display = 'block';
+}
+function showMsg(text) {
+  document.getElementById('msg').innerHTML = '<div class="msg err">' + text + '</div>';
+}
+document.getElementById('riderIdInput').addEventListener('keypress', e => { if (e.key === 'Enter') checkFuel(); });
+</script>
+</body></html>`);
+});
+
+app.get('/fuel/check', async (req, res) => {
+  const { id } = req.query;
+  if (!id) return res.json({ ok: false, error: 'No ID provided.' });
+  const data = await getFuelData(id.trim());
+  if (!data || data.length === 0) return res.json({ ok: false, error: 'No fuel records found for this ID. Please check with your supervisor.' });
+  const riderName = data[0].rider_name || 'Rider';
+  return res.json({ ok: true, rider_name: riderName, weeks: data.map(r => ({ week: r.week, amount: r.amount })) });
+});
+
+
 app.listen(PORT, () => {
   console.log(`COD Tracker running on port ${PORT}`);
   getSheetAuth().then(async () => {
