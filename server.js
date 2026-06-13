@@ -1558,7 +1558,9 @@ app.get('/fuel/check', async (req, res) => {
   return res.json({ ok: true, rider_name: riderName, weeks: data.map(r => ({ week: r.week, amount: r.amount })) });
 });
 
+const PORT = process.env.PORT || 3000;
 
+app.listen(PORT, () => {
 app.listen(PORT, () => {
   console.log(`COD Tracker running on port ${PORT}`);
   getSheetAuth().then(async () => {
