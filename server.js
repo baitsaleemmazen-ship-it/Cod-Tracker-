@@ -6,17 +6,21 @@ const { google } = require('googleapis');
 const Anthropic = require('@anthropic-ai/sdk');
 const fs = require('fs');
 const path = require('path');
-const cloudinary = require('cloudinary').v2;
-const XLSX = require('xlsx');
+let cloudinary, XLSX;
+try { cloudinary = require('cloudinary').v2; } catch(e) { console.error('cloudinary not installed'); }
+try { XLSX = require('xlsx'); } catch(e) { console.error('xlsx not installed'); }
 
 // ─── Cloudinary config ────────────────────────────────────────────────────────
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET
-});
+if (cloudinary) {
+  cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET
+  });
+}
 
 async function uploadToCloudinary(b64, mediaType, folder, publicId) {
+  if (!cloudinary) return null;
   try {
     const dataUri = `data:${mediaType};base64,${b64}`;
     const result = await cloudinary.uploader.upload(dataUri, {
@@ -25,7 +29,7 @@ async function uploadToCloudinary(b64, mediaType, folder, publicId) {
       overwrite: true,
       resource_type: 'image',
       invalidate: true,
-      expires_at: Math.floor(Date.now() / 1000) + (30 * 24 * 60 * 60) // 30 days
+      expires_at: Math.floor(Date.now() / 1000) + (30 * 24 * 60 * 60)
     });
     return result.secure_url;
   } catch(e) {
@@ -1446,6 +1450,7 @@ app.post('/admin/fuel-upload', requireAdmin, uploadFuel.single('fuel_file'), asy
     if (!req.file) return res.redirect('/admin/fuel-upload?error=No+file+uploaded');
     if (!weekLabel) return res.redirect('/admin/fuel-upload?error=No+week+label');
 
+    if (!XLSX) return res.redirect('/admin/fuel-upload?error=xlsx+module+not+available');
     // Parse Excel
     const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
@@ -1558,9 +1563,8 @@ app.get('/fuel/check', async (req, res) => {
   return res.json({ ok: true, rider_name: riderName, weeks: data.map(r => ({ week: r.week, amount: r.amount })) });
 });
 
-const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, () => {
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`COD Tracker running on port ${PORT}`);
   getSheetAuth().then(async () => {
