@@ -125,7 +125,6 @@ function saveSubmissions() {
 // Load today's submissions from Google Sheet (Submissions tab) on startup
 async function loadTodaySubmissionsFromSheet() {
   try {
-    const today = new Date(new Date().getTime() + 4*60*60*1000).toISOString().slice(0,10);
     const { sheets, spreadsheetId } = await getSheetAuth();
     const meta = await sheets.spreadsheets.get({ spreadsheetId });
     const existing = meta.data.sheets.map(s => s.properties.title);
@@ -137,36 +136,50 @@ async function loadTodaySubmissionsFromSheet() {
       await sheets.spreadsheets.values.update({
         spreadsheetId, range: 'Submissions!A1',
         valueInputOption: 'RAW',
-        requestBody: { values: [['id','rider_id','rider_name','amount','talabat_amount','bank','date','submitted_at','status','flags','is_late','account_name','beneficiary_name','needs_amount']] }
+        requestBody: { values: [['id','rider_id','rider_name','amount','talabat_amount','bank','date','submitted_at','status','flags','is_late','account_name','beneficiary_name','needs_amount','bank_url','talabat_url','talabat_deliveries']] }
       });
       return;
     }
-    const res = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Submissions!A:N' });
+    const res = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Submissions!A:Q' });
     const rows = (res.data.values || []).slice(1);
-    const todayFromSheet = rows
-      .filter(r => r[6] === today)
+    // Load ALL submissions from sheet (not just today)
+    const fromSheet = rows
+      .filter(r => r[0] && r[6]) // must have id and date
       .map(r => ({
         id: r[0], rider_id: r[1], rider_name: r[2],
         amount: r[3] ? parseFloat(r[3]) : null,
         talabat_amount: r[4] ? parseFloat(r[4]) : null,
         bank: r[5] || null, date: r[6], submitted_at: r[7], status: r[8],
-        flags: r[9] ? JSON.parse(r[9]) : [],
+        flags: r[9] ? (() => { try { return JSON.parse(r[9]); } catch(e) { return []; } })() : [],
         is_late: r[10] === 'true',
         account_name: r[11] || null, beneficiary_name: r[12] || null,
-        needs_amount: r[13] === 'true'
+        needs_amount: r[13] === 'true',
+        bank_url: r[14] || null,
+        talabat_url: r[15] || null,
+        talabat_deliveries: r[16] ? parseInt(r[16]) : null
       }));
-    // Merge — keep existing (with images) and add any missing from sheet
+    // Merge — keep existing (with images in memory) and add any missing from sheet
     const existingIds = new Set(submissions.map(s => s.id));
-    todayFromSheet.forEach(s => { if (!existingIds.has(s.id)) submissions.push(s); });
-    console.log(`Loaded ${todayFromSheet.length} today's submissions from sheet`);
-  } catch(e) { console.error('loadTodaySubmissionsFromSheet error:', e.message); }
+    let added = 0;
+    fromSheet.forEach(s => { if (!existingIds.has(s.id)) { submissions.push(s); added++; } });
+    // Also update bank_url/talabat_url for existing submissions that may be missing them
+    fromSheet.forEach(s => {
+      const existing = submissions.find(ex => ex.id === s.id);
+      if (existing) {
+        if (!existing.bank_url && s.bank_url) existing.bank_url = s.bank_url;
+        if (!existing.talabat_url && s.talabat_url) existing.talabat_url = s.talabat_url;
+        if (!existing.talabat_deliveries && s.talabat_deliveries) existing.talabat_deliveries = s.talabat_deliveries;
+      }
+    });
+    console.log(`Loaded ${fromSheet.length} submissions from sheet (${added} new)`);
+  } catch(e) { console.error('loadSubmissionsFromSheet error:', e.message); }
 }
 
 async function saveSubmissionToSheet(sub) {
   try {
     const { sheets, spreadsheetId } = await getSheetAuth();
     await sheets.spreadsheets.values.append({
-      spreadsheetId, range: 'Submissions!A:N', valueInputOption: 'RAW',
+      spreadsheetId, range: 'Submissions!A:Q', valueInputOption: 'RAW',
       requestBody: { values: [[
         sub.id, sub.rider_id, sub.rider_name,
         sub.amount || '', sub.talabat_amount || '', sub.bank || '',
@@ -174,7 +187,9 @@ async function saveSubmissionToSheet(sub) {
         JSON.stringify(sub.flags || []),
         sub.is_late ? 'true' : 'false',
         sub.account_name || '', sub.beneficiary_name || '',
-        sub.needs_amount ? 'true' : 'false'
+        sub.needs_amount ? 'true' : 'false',
+        sub.bank_url || '', sub.talabat_url || '',
+        sub.talabat_deliveries || ''
       ]]}
     });
   } catch(e) { console.error('saveSubmissionToSheet error:', e.message); }
@@ -189,7 +204,7 @@ async function updateSubmissionInSheet(sub) {
     if (rowIndex === -1) return;
     const rowNum = rowIndex + 1;
     await sheets.spreadsheets.values.update({
-      spreadsheetId, range: `Submissions!A${rowNum}:N${rowNum}`, valueInputOption: 'RAW',
+      spreadsheetId, range: `Submissions!A${rowNum}:Q${rowNum}`, valueInputOption: 'RAW',
       requestBody: { values: [[
         sub.id, sub.rider_id, sub.rider_name,
         sub.amount || '', sub.talabat_amount || '', sub.bank || '',
@@ -197,7 +212,9 @@ async function updateSubmissionInSheet(sub) {
         JSON.stringify(sub.flags || []),
         sub.is_late ? 'true' : 'false',
         sub.account_name || '', sub.beneficiary_name || '',
-        sub.needs_amount ? 'true' : 'false'
+        sub.needs_amount ? 'true' : 'false',
+        sub.bank_url || '', sub.talabat_url || '',
+        sub.talabat_deliveries || ''
       ]]}
     });
   } catch(e) { console.error('updateSubmissionInSheet error:', e.message); }
