@@ -1076,11 +1076,16 @@ app.get('/admin', requireAdmin, (req, res) => {
   const submittedIds = new Set(todaySubs.map(s => s.rider_id));
   const pendingRiders = isToday ? riders.filter(r => !submittedIds.has(r.id)) : [];
 
-  const rows = todaySubs.sort((a, b) => b.submitted_at.localeCompare(a.submitted_at)).map(s => `
+  const rows = todaySubs.sort((a, b) => b.submitted_at.localeCompare(a.submitted_at)).map(s => {
+    const hasBank = s.bank_url || imageStore[s.id]?.bankB64;
+    const hasTalabat = s.talabat_url || imageStore[s.id]?.talabatB64;
+    return `
     <tr>
       <td>
         <a href="/receipt/${s.id}" target="_blank">
-          <img src="${s.bank_url || `/receipt/${s.id}`}" style="width:48px;height:48px;object-fit:cover;border-radius:8px;border:1px solid #eee;display:block;" alt="receipt" onerror="this.style.display='none';this.parentElement.innerHTML='<div style=width:48px;height:48px;background:#f5f5f5;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:20px>📄</div>'">
+          ${hasBank
+            ? `<img src="${s.bank_url || `/receipt/${s.id}`}" style="width:48px;height:48px;object-fit:cover;border-radius:8px;border:1px solid #eee;display:block;" alt="receipt" onerror="this.src='/receipt/${s.id}'">`
+            : `<div style="width:48px;height:48px;background:#f5f5f5;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:20px;">📄</div>`}
         </a>
       </td>
       <td style="font-weight:500;font-size:13px;">${s.rider_name}${s.is_late ? ' <span style="background:#fff3e0;color:#e65100;font-size:10px;padding:1px 5px;border-radius:4px;">LATE</span>' : ''}</td>
@@ -1100,8 +1105,8 @@ app.get('/admin', requireAdmin, (req, res) => {
             <input name="manual_amount" type="number" step="0.01" placeholder="Amount (OMR)" value="${s.amount || ''}" style="width:100%;padding:4px 7px;border:1px solid #ddd;border-radius:6px;font-size:12px;margin-bottom:4px;" ${s.amount ? '' : 'required'}>
             <div style="display:flex;gap:4px;flex-wrap:wrap;">
               <button class="act-btn ok-btn">✓ Approve</button>
-              ${s.image_b64 ? `<a href="/receipt/${s.id}" target="_blank" class="act-btn" style="background:#e8f0fe;color:#1a73e8;text-decoration:none;">👁 Bank</a>` : ''}
-              ${s.talabat_b64 ? `<a href="/talabat/${s.id}" target="_blank" class="act-btn" style="background:#fff3e0;color:#e65100;text-decoration:none;">🛵</a>` : ''}
+              ${hasBank ? `<a href="/receipt/${s.id}" target="_blank" class="act-btn" style="background:#e8f0fe;color:#1a73e8;text-decoration:none;">👁 Bank</a>` : ''}
+              ${hasTalabat ? `<a href="/talabat/${s.id}" target="_blank" class="act-btn" style="background:#fff3e0;color:#e65100;text-decoration:none;">🛵</a>` : ''}
             </div>
           </form>
           <div style="display:flex;gap:4px;margin-top:3px;">
@@ -1109,13 +1114,14 @@ app.get('/admin', requireAdmin, (req, res) => {
             <form method="POST" action="/admin/delete/${s.id}" onsubmit="return confirm('Delete?')" style="margin:0;"><button class="act-btn" style="background:#f5f5f5;color:#888;">🗑</button></form>
           </div>` :
           `<div style="margin-top:3px;display:flex;gap:4px;flex-wrap:wrap;align-items:center;">
-            ${s.image_b64 ? `<a href="/receipt/${s.id}" target="_blank" style="font-size:11px;color:#1a73e8;">👁 Bank</a>` : ''}
-            ${s.talabat_b64 ? `<a href="/talabat/${s.id}" target="_blank" style="font-size:11px;color:#e65100;">🛵 Talabat</a>` : ''}
+            ${hasBank ? `<a href="/receipt/${s.id}" target="_blank" style="font-size:11px;color:#1a73e8;">👁 Bank</a>` : ''}
+            ${hasTalabat ? `<a href="/talabat/${s.id}" target="_blank" style="font-size:11px;color:#e65100;">🛵 Talabat</a>` : ''}
             <a href="/admin/edit/${s.id}" style="font-size:11px;color:#888;">✏️ Edit</a>
             <form method="POST" action="/admin/delete/${s.id}" onsubmit="return confirm('Delete?')" style="margin:0;"><button class="act-btn" style="background:#f5f5f5;color:#888;font-size:11px;">🗑</button></form>
           </div>`}
       </td>
-    </tr>`).join('');
+    </tr>`;
+  }).join('');
 
   const pendingRows = pendingRiders.map(r => `
     <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid #f5f5f5;">
