@@ -119,7 +119,14 @@ if (fs.existsSync(SUBS_FILE)) {
   try { submissions = JSON.parse(fs.readFileSync(SUBS_FILE)); } catch(e) { submissions = []; }
 }
 function saveSubmissions() {
-  try { fs.writeFileSync(SUBS_FILE, JSON.stringify(submissions, null, 2)); } catch(e) {}
+  try {
+    // Strip any base64 image data before saving to keep file small
+    const clean = submissions.map(s => {
+      const { image_b64, image_type, talabat_b64, talabat_type, ...rest } = s;
+      return rest;
+    });
+    fs.writeFileSync(SUBS_FILE, JSON.stringify(clean, null, 2));
+  } catch(e) { console.error('saveSubmissions error:', e.message); }
 }
 
 // Load today's submissions from Google Sheet (Submissions tab) on startup
@@ -764,13 +771,11 @@ Return ONLY this JSON, no markdown:
       needs_amount: needsAmount,
       talabat_amount: talabatResult.collected_amount || null,
       talabat_deliveries: talabatResult.deliveries || null,
-      image_b64: bankB64,
-      image_type: bankMediaType,
       account_name: aiResult.account_name || null,
       beneficiary_name: aiResult.beneficiary_name || null,
-      talabat_b64: talabatB64,
-      talabat_type: talabatMediaType,
-      is_late: isLate
+      is_late: isLate,
+      bank_url: null,
+      talabat_url: null
     };
 
     submissions.push(submission);
@@ -1161,17 +1166,16 @@ app.get('/admin', requireAdmin, (req, res) => {
   .rej-btn{background:#fce8e6;color:#c62828;}
   @media(max-width:500px){th:nth-child(3),td:nth-child(3),th:nth-child(5),td:nth-child(5){display:none;}}
 </style>
-<meta http-equiv="refresh" content="10">
+<meta http-equiv="refresh" content="15">
 <script>
-// Auto-refresh every 10 seconds, but pause if user is interacting with a form
 let refreshTimer;
 function resetRefresh() {
   clearTimeout(refreshTimer);
-  refreshTimer = setTimeout(() => location.reload(), 10000);
+  refreshTimer = setTimeout(() => location.reload(), 15000);
 }
 document.addEventListener('DOMContentLoaded', () => {
   resetRefresh();
-  document.querySelectorAll('input, button, select').forEach(el => {
+  document.querySelectorAll('input, select').forEach(el => {
     el.addEventListener('focus', () => clearTimeout(refreshTimer));
     el.addEventListener('blur', resetRefresh);
   });
@@ -1354,7 +1358,19 @@ app.post('/admin/riders/delete/:id', requireAdmin, async (req, res) => {
   res.redirect('/admin/riders');
 });
 
-// ─── Export CSV ───────────────────────────────────────────────────────────────
+// ─── Debug endpoint ───────────────────────────────────────────────────────────
+app.get('/admin/debug', requireAdmin, (req, res) => {
+  const today = new Date(new Date().getTime() + 4*60*60*1000).toISOString().slice(0,10);
+  res.json({
+    total_submissions: submissions.length,
+    today,
+    today_count: submissions.filter(s => s.date === today).length,
+    dates_in_memory: [...new Set(submissions.map(s => s.date))].sort().reverse(),
+    last_5: submissions.slice(-5).map(s => ({ id: s.id, date: s.date, rider: s.rider_name, status: s.status, has_bank_url: !!s.bank_url }))
+  });
+});
+
+
 app.get('/admin/export', requireAdmin, (req, res) => {
   const today = new Date().toISOString().slice(0, 10);
   const rows = submissions.filter(s => s.date === today && s.status === 'approved');
