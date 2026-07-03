@@ -779,34 +779,41 @@ Return ONLY this JSON, no markdown:
     };
 
     submissions.push(submission);
+    saveSubmissions();
+    saveSubmissionToSheet(submission).catch(e => console.error('saveSubmissionToSheet error:', e.message));
 
     // Store in memory for instant display
     imageStore[submission.id] = { bankB64, bankMediaType, talabatB64, talabatMediaType };
 
-    // Upload to Cloudinary synchronously — ensures images available immediately in admin
-    const riderSafeName = (riderObj.name || 'unknown').replace(/[^a-zA-Z0-9]/g, '_');
-    const [bankUrl, talabatUrl] = await Promise.all([
-      uploadToCloudinary(bankB64, bankMediaType, today, `${submission.id}_${riderSafeName}_bank`),
-      uploadToCloudinary(talabatB64, talabatMediaType, today, `${submission.id}_${riderSafeName}_talabat`)
-    ]);
-    if (bankUrl) submission.bank_url = bankUrl;
-    if (talabatUrl) submission.talabat_url = talabatUrl;
+    // Auto-write to sheet if approved and amount known
+    if (status === 'approved' && aiResult.amount) {
+      fillRiderRow(submission).catch(e => console.error('fillRiderRow error:', e.message));
+    }
 
-    saveSubmissions();
-    saveSubmissionToSheet(submission).catch(e => console.error('saveSubmissionToSheet error:', e.message));
+    // Respond to rider immediately — don't wait for Cloudinary
+    res.json({ ok: true });
 
-    // WhatsApp alert
+    // Upload to Cloudinary in background after responding
+    if (cloudinary) {
+      const riderSafeName = (riderObj.name || 'unknown').replace(/[^a-zA-Z0-9]/g, '_');
+      Promise.all([
+        uploadToCloudinary(bankB64, bankMediaType, today, `${submission.id}_${riderSafeName}_bank`),
+        uploadToCloudinary(talabatB64, talabatMediaType, today, `${submission.id}_${riderSafeName}_talabat`)
+      ]).then(([bankUrl, talabatUrl]) => {
+        if (bankUrl) { submission.bank_url = bankUrl; }
+        if (talabatUrl) { submission.talabat_url = talabatUrl; }
+        if (bankUrl || talabatUrl) {
+          saveSubmissions();
+          updateSubmissionInSheet(submission).catch(e => console.error('updateSubmissionInSheet error:', e.message));
+        }
+      }).catch(e => console.error('Cloudinary background upload error:', e.message));
+    }
+
+    // WhatsApp alert in background
     const waMsg = status === 'flagged'
       ? `⚠️ *COD Alert — Flagged*\nRider: ${riderObj.name}\nAmount: ${aiResult.amount ? aiResult.amount + ' OMR' : 'Not detected'}\nReason: ${flags.join(', ')}`
       : `✅ *COD Submitted*\nRider: ${riderObj.name}\nAmount: ${aiResult.amount ? aiResult.amount + ' OMR' : 'Not detected'}${isLate ? '\n⏰ LATE submission' : ''}`;
     sendWhatsApp(waMsg);
-
-    // Auto-write to sheet if approved and amount known
-    if (status === 'approved' && aiResult.amount) {
-      await fillRiderRow(submission);
-    }
-
-    res.json({ ok: true });
   } catch (e) {
     console.error(e);
     res.json({ ok: false, error: 'Server error.' });
