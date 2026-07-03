@@ -143,11 +143,11 @@ async function loadTodaySubmissionsFromSheet() {
       await sheets.spreadsheets.values.update({
         spreadsheetId, range: 'Submissions!A1',
         valueInputOption: 'RAW',
-        requestBody: { values: [['id','rider_id','rider_name','amount','talabat_amount','bank','date','submitted_at','status','flags','is_late','account_name','beneficiary_name','needs_amount','bank_url','talabat_url','talabat_deliveries']] }
+        requestBody: { values: [['id','rider_id','rider_name','amount','talabat_amount','bank','date','submitted_at','status','flags','is_late','account_name','beneficiary_name','needs_amount','bank_url','talabat_url','talabat_deliveries','talabat_date']] }
       });
       return;
     }
-    const res = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Submissions!A:Q' });
+    const res = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Submissions!A:R' });
     const rows = (res.data.values || []).slice(1);
     // Load ALL submissions from sheet (not just today)
     const fromSheet = rows
@@ -163,19 +163,19 @@ async function loadTodaySubmissionsFromSheet() {
         needs_amount: r[13] === 'true',
         bank_url: r[14] || null,
         talabat_url: r[15] || null,
-        talabat_deliveries: r[16] ? parseInt(r[16]) : null
+        talabat_deliveries: r[16] ? parseInt(r[16]) : null,
+        talabat_date: r[17] || null
       }));
-    // Merge — keep existing (with images in memory) and add any missing from sheet
     const existingIds = new Set(submissions.map(s => s.id));
     let added = 0;
     fromSheet.forEach(s => { if (!existingIds.has(s.id)) { submissions.push(s); added++; } });
-    // Also update bank_url/talabat_url for existing submissions that may be missing them
     fromSheet.forEach(s => {
       const existing = submissions.find(ex => ex.id === s.id);
       if (existing) {
         if (!existing.bank_url && s.bank_url) existing.bank_url = s.bank_url;
         if (!existing.talabat_url && s.talabat_url) existing.talabat_url = s.talabat_url;
         if (!existing.talabat_deliveries && s.talabat_deliveries) existing.talabat_deliveries = s.talabat_deliveries;
+        if (!existing.talabat_date && s.talabat_date) existing.talabat_date = s.talabat_date;
       }
     });
     console.log(`Loaded ${fromSheet.length} submissions from sheet (${added} new)`);
@@ -186,7 +186,7 @@ async function saveSubmissionToSheet(sub) {
   try {
     const { sheets, spreadsheetId } = await getSheetAuth();
     await sheets.spreadsheets.values.append({
-      spreadsheetId, range: 'Submissions!A:Q', valueInputOption: 'RAW',
+      spreadsheetId, range: 'Submissions!A:R', valueInputOption: 'RAW',
       requestBody: { values: [[
         sub.id, sub.rider_id, sub.rider_name,
         sub.amount || '', sub.talabat_amount || '', sub.bank || '',
@@ -196,7 +196,7 @@ async function saveSubmissionToSheet(sub) {
         sub.account_name || '', sub.beneficiary_name || '',
         sub.needs_amount ? 'true' : 'false',
         sub.bank_url || '', sub.talabat_url || '',
-        sub.talabat_deliveries || ''
+        sub.talabat_deliveries || '', sub.talabat_date || ''
       ]]}
     });
   } catch(e) { console.error('saveSubmissionToSheet error:', e.message); }
@@ -211,7 +211,7 @@ async function updateSubmissionInSheet(sub) {
     if (rowIndex === -1) return;
     const rowNum = rowIndex + 1;
     await sheets.spreadsheets.values.update({
-      spreadsheetId, range: `Submissions!A${rowNum}:Q${rowNum}`, valueInputOption: 'RAW',
+      spreadsheetId, range: `Submissions!A${rowNum}:R${rowNum}`, valueInputOption: 'RAW',
       requestBody: { values: [[
         sub.id, sub.rider_id, sub.rider_name,
         sub.amount || '', sub.talabat_amount || '', sub.bank || '',
@@ -221,7 +221,7 @@ async function updateSubmissionInSheet(sub) {
         sub.account_name || '', sub.beneficiary_name || '',
         sub.needs_amount ? 'true' : 'false',
         sub.bank_url || '', sub.talabat_url || '',
-        sub.talabat_deliveries || ''
+        sub.talabat_deliveries || '', sub.talabat_date || ''
       ]]}
     });
   } catch(e) { console.error('updateSubmissionInSheet error:', e.message); }
@@ -270,7 +270,7 @@ async function ensureDailySheet(date) {
 
       // Write data: row1=company, row2=date, row3=headers, row4+=riders
       const headers = ['#', 'Rider Name', 'Rider ID', 'Orders', 'Talabat Collected (OMR)', 'Bank Amount (OMR)', 'Bank', 'Submitted At', 'Status'];
-      const riderRows = riders.map((r, i) => [i + 1, r.name, r.id, '', '', '', '', '', 'Not Submitted']);
+      const riderRows = riders.map((r, i) => [i + 1, r.name, r.id, 0, 0, 0, '', '', 'Not Submitted']);
       const COLS = 9;
       await sheets.spreadsheets.values.update({
         spreadsheetId,
@@ -870,9 +870,9 @@ Return ONLY this JSON, no markdown:
     // Soft flag only (still approved): amount not detected — admin enters manually
     const needsAmount = !aiResult.amount;
 
-    // Late submission check (after 8 PM GMT+4)
-    const gmt4Hour = new Date(new Date().getTime() + 4*60*60*1000).getHours();
-    const isLate = gmt4Hour >= 18;
+    // Late submission check (after 6:30 PM GMT+4)
+    const gmt4Now = new Date(new Date().getTime() + 4*60*60*1000);
+    const isLate = gmt4Now.getHours() > 18 || (gmt4Now.getHours() === 18 && gmt4Now.getMinutes() >= 30);
 
     const submission = {
       id: Date.now().toString(),
@@ -888,6 +888,7 @@ Return ONLY this JSON, no markdown:
       needs_amount: needsAmount,
       talabat_amount: talabatResult.collected_amount || null,
       talabat_deliveries: talabatResult.deliveries || null,
+      talabat_date: talabatResult.date || null, // date rider actually worked
       account_name: aiResult.account_name || null,
       beneficiary_name: aiResult.beneficiary_name || null,
       is_late: isLate,
@@ -1049,26 +1050,24 @@ async function generateFuelSheet() {
     const tabName = `Fuel ${weekStart} to ${weekEnd}`;
 
     // Read deliveries from Submissions sheet (column G=date, B=rider_id, C=rider_name, I=status, Q=deliveries)
-    const subsRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Submissions!A:Q' });
+    const subsRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Submissions!A:R' });
     const subsRows = (subsRes.data.values || []).slice(1);
 
-    // Filter approved submissions within the week range
+    // Filter by talabat_date (day rider actually worked), fall back to submission date
     const weekRows = subsRows.filter(r => {
-      const date = r[6]; // column G
-      const status = r[8]; // column I
-      return date && date >= weekStart && date <= weekEnd && status === 'approved';
+      const workDate = r[17] || r[6]; // talabat_date (col R) or submission date (col G)
+      const status = r[8];
+      return workDate && workDate >= weekStart && workDate <= weekEnd && status === 'approved';
     });
 
     // Sum deliveries per rider
     const riderDeliveries = {};
     weekRows.forEach(r => {
-      const riderId = r[1]; // column B
-      const riderName = r[2]; // column C
-      const deliveries = parseInt(r[16]) || 0; // column Q
+      const riderId = r[1];
+      const riderName = r[2];
+      const deliveries = parseInt(r[16]) || 0;
       if (!riderId) return;
-      if (!riderDeliveries[riderId]) {
-        riderDeliveries[riderId] = { name: riderName, id: riderId, deliveries: 0 };
-      }
+      if (!riderDeliveries[riderId]) riderDeliveries[riderId] = { name: riderName, id: riderId, deliveries: 0 };
       riderDeliveries[riderId].deliveries += deliveries;
     });
 
@@ -1193,9 +1192,13 @@ async function generatePerformanceSheet() {
     if (meta.data.sheets.map(s => s.properties.title).includes(tabName)) return;
 
     // Read from Submissions sheet
-    const subsRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Submissions!A:Q' });
+    const subsRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Submissions!A:R' });
     const subsRows = (subsRes.data.values || []).slice(1);
-    const weekRows = subsRows.filter(r => r[6] && r[6] >= weekStart && r[6] <= weekEnd);
+    // Filter by talabat_date (actual work date), fall back to submission date
+    const weekRows = subsRows.filter(r => {
+      const workDate = r[17] || r[6];
+      return workDate && workDate >= weekStart && workDate <= weekEnd;
+    });
 
     // Build per-rider stats
     const riderStats = {};
@@ -1286,21 +1289,128 @@ function scheduleWeeklyFuel() {
 }
 scheduleWeeklyFuel();
 
+// ─── Monthly summary — auto on 1st of month at 8 PM GMT+4 ────────────────────
+async function generateMonthlyReport(yearMonth) {
+  try {
+    const { sheets, spreadsheetId } = await getSheetAuth();
+    const now = new Date(new Date().getTime() + 4*60*60*1000);
+    const ym = yearMonth || `${now.getFullYear()}-${String(now.getMonth()).padStart(2,'0')}`;
+    const [year, month] = ym.split('-').map(Number);
+    const monthName = new Date(year, month-1, 1).toLocaleString('en-US', {month:'long'});
+    const tabName = `Monthly ${monthName} ${year}`;
+    const meta = await sheets.spreadsheets.get({ spreadsheetId });
+    if (meta.data.sheets.map(s => s.properties.title).includes(tabName)) return;
+    const subsRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Submissions!A:R' });
+    const subsRows = (subsRes.data.values || []).slice(1);
+    // Filter by talabat_date (actual work date), fall back to submission date
+    const monthRows = subsRows.filter(r => {
+      const workDate = r[17] || r[6];
+      return workDate && workDate.startsWith(ym);
+    });
+    const riderStats = {};
+    riders.forEach(r => { riderStats[r.id] = { name:r.name, id:r.id, days:0, orders:0, totalCod:0, lateCount:0, lateTimes:[] }; });
+    monthRows.forEach(r => {
+      const id = r[1];
+      if (!riderStats[id]) riderStats[id] = { name:r[2], id, days:0, orders:0, totalCod:0, lateCount:0, lateTimes:[] };
+      if (r[8] === 'approved' || r[8] === 'flagged') {
+        riderStats[id].days++;
+        riderStats[id].orders += parseInt(r[16]) || 0;
+        riderStats[id].totalCod += parseFloat(r[3]) || 0;
+        if (r[10] === 'true') {
+          riderStats[id].lateCount++;
+          if (r[7]) {
+            const t = new Date(new Date(r[7]).getTime()+4*60*60*1000).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:true});
+            riderStats[id].lateTimes.push(`${r[6]} ${t}`);
+          }
+        }
+      }
+    });
+    const COLS = 7;
+    const riderRows2 = riders.map((r,i) => {
+      const s = riderStats[r.id] || {days:0,orders:0,totalCod:0,lateCount:0,lateTimes:[]};
+      return [i+1, r.name, r.id, s.days, s.orders, s.totalCod.toFixed(3), s.lateCount > 0 ? `${s.lateCount}x — ${s.lateTimes.slice(0,5).join(', ')}` : '—'];
+    });
+    const addRes = await sheets.spreadsheets.batchUpdate({ spreadsheetId, requestBody:{requests:[{addSheet:{properties:{title:tabName}}}]} });
+    const sheetId = addRes.data.replies[0].addSheet.properties.sheetId;
+    const totalRows = riders.length + 3;
+    await sheets.spreadsheets.values.update({ spreadsheetId, range:`${tabName}!A1`, valueInputOption:'RAW',
+      requestBody:{values:[['Future Wave','','','','','',''], [`Monthly Report — ${monthName} ${year}`,'','','','','',''],
+        ['#','Rider Name','Rider ID','Days Worked','Total Orders','Total COD (OMR)','Late Submissions'], ...riderRows2]}});
+    await sheets.spreadsheets.batchUpdate({ spreadsheetId, requestBody:{requests:[
+      {mergeCells:{range:{sheetId,startRowIndex:0,endRowIndex:1,startColumnIndex:0,endColumnIndex:COLS},mergeType:'MERGE_ALL'}},
+      {mergeCells:{range:{sheetId,startRowIndex:1,endRowIndex:2,startColumnIndex:0,endColumnIndex:COLS},mergeType:'MERGE_ALL'}},
+      {repeatCell:{range:{sheetId,startRowIndex:0,endRowIndex:1,startColumnIndex:0,endColumnIndex:COLS},cell:{userEnteredFormat:{backgroundColor:{red:0.067,green:0.31,blue:0.165},horizontalAlignment:'CENTER',textFormat:{foregroundColor:{red:1,green:1,blue:1},bold:true,fontSize:16}}},fields:'userEnteredFormat'}},
+      {repeatCell:{range:{sheetId,startRowIndex:1,endRowIndex:2,startColumnIndex:0,endColumnIndex:COLS},cell:{userEnteredFormat:{backgroundColor:{red:0.851,green:0.918,blue:0.863},horizontalAlignment:'CENTER',textFormat:{foregroundColor:{red:0.067,green:0.31,blue:0.165},bold:true,fontSize:12}}},fields:'userEnteredFormat'}},
+      {repeatCell:{range:{sheetId,startRowIndex:2,endRowIndex:3,startColumnIndex:0,endColumnIndex:COLS},cell:{userEnteredFormat:{backgroundColor:{red:0.067,green:0.31,blue:0.165},horizontalAlignment:'CENTER',textFormat:{foregroundColor:{red:1,green:1,blue:1},bold:true,fontSize:11}}},fields:'userEnteredFormat'}},
+      ...riderRows2.map((_,i)=>({repeatCell:{range:{sheetId,startRowIndex:3+i,endRowIndex:4+i,startColumnIndex:0,endColumnIndex:COLS},cell:{userEnteredFormat:{backgroundColor:i%2===0?{red:1,green:1,blue:1}:{red:0.949,green:0.949,blue:0.949},horizontalAlignment:'CENTER',textFormat:{fontSize:10}}},fields:'userEnteredFormat'}})),
+      ...riderRows2.map((row,i)=>row[6]!=='—'?{repeatCell:{range:{sheetId,startRowIndex:3+i,endRowIndex:4+i,startColumnIndex:6,endColumnIndex:7},cell:{userEnteredFormat:{backgroundColor:{red:1.0,green:0.953,blue:0.714},textFormat:{bold:true}}},fields:'userEnteredFormat'}}:null).filter(Boolean),
+      {updateDimensionProperties:{range:{sheetId,dimension:'ROWS',startIndex:0,endIndex:1},properties:{pixelSize:45},fields:'pixelSize'}},
+      {updateDimensionProperties:{range:{sheetId,dimension:'ROWS',startIndex:1,endIndex:totalRows},properties:{pixelSize:25},fields:'pixelSize'}},
+      {updateDimensionProperties:{range:{sheetId,dimension:'COLUMNS',startIndex:1,endIndex:2},properties:{pixelSize:180},fields:'pixelSize'}},
+      {updateDimensionProperties:{range:{sheetId,dimension:'COLUMNS',startIndex:5,endIndex:6},properties:{pixelSize:130},fields:'pixelSize'}},
+      {updateDimensionProperties:{range:{sheetId,dimension:'COLUMNS',startIndex:6,endIndex:7},properties:{pixelSize:250},fields:'pixelSize'}},
+    ]}});
+    console.log(`Monthly report generated: ${tabName}`);
+  } catch(e) { console.error('generateMonthlyReport error:', e.message); }
+}
+function scheduleMonthlyReport() {
+  const now = new Date();
+  const gmt4 = new Date(now.getTime() + 4*60*60*1000);
+  const next = new Date(gmt4);
+  next.setMonth(next.getMonth()+1); next.setDate(1); next.setHours(20,0,0,0);
+  setTimeout(async () => {
+    const prev = new Date(new Date().getTime()+4*60*60*1000); prev.setDate(0);
+    await generateMonthlyReport(`${prev.getFullYear()}-${String(prev.getMonth()+1).padStart(2,'0')}`);
+    scheduleMonthlyReport();
+  }, next - gmt4);
+}
+scheduleMonthlyReport();
+
 app.post('/admin/generate-fuel', requireAdmin, async (req, res) => {
   generateFuelSheet().catch(e => console.error('Fuel sheet error:', e.message));
   generatePerformanceSheet().catch(e => console.error('Performance sheet error:', e.message));
   res.redirect('/admin?fuel=generating');
 });
 
-// ══════════════════════════════════════════════════════════════════════════════
-// ADMIN — dashboard
+app.post('/admin/generate-monthly', requireAdmin, async (req, res) => {
+  const ym = req.body.year_month || new Date(new Date().getTime()+4*60*60*1000).toISOString().slice(0,7);
+  generateMonthlyReport(ym).catch(e => console.error('Monthly report error:', e.message));
+  res.redirect('/admin');
+});
 
 // ══════════════════════════════════════════════════════════════════════════════
-app.get('/admin', requireAdmin, (req, res) => {
+app.get('/admin', requireAdmin, async (req, res) => {
   const today = new Date(new Date().getTime() + 4*60*60*1000).toISOString().slice(0,10);
   const selectedDate = req.query.date || today;
   const isToday = selectedDate === today;
-  const todaySubs = submissions.filter(s => s.date === selectedDate);
+
+  // If past date not in memory, load from sheet
+  let dateSubs = submissions.filter(s => s.date === selectedDate);
+  if (dateSubs.length === 0 && !isToday) {
+    try {
+      const { sheets, spreadsheetId } = await getSheetAuth();
+      const res2 = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Submissions!A:R' });
+      const rows2 = (res2.data.values || []).slice(1);
+      const fromSheet = rows2.filter(r => r[6] === selectedDate).map(r => ({
+        id: r[0], rider_id: r[1], rider_name: r[2],
+        amount: r[3] ? parseFloat(r[3]) : null,
+        talabat_amount: r[4] ? parseFloat(r[4]) : null,
+        bank: r[5] || null, date: r[6], submitted_at: r[7], status: r[8],
+        flags: r[9] ? (() => { try { return JSON.parse(r[9]); } catch(e) { return []; } })() : [],
+        is_late: r[10] === 'true',
+        account_name: r[11] || null, beneficiary_name: r[12] || null,
+        needs_amount: r[13] === 'true',
+        bank_url: r[14] || null, talabat_url: r[15] || null,
+        talabat_deliveries: r[16] ? parseInt(r[16]) : null
+      }));
+      // Merge into memory
+      const existingIds = new Set(submissions.map(s => s.id));
+      fromSheet.forEach(s => { if (!existingIds.has(s.id)) submissions.push(s); });
+      dateSubs = fromSheet;
+    } catch(e) { console.error('Admin sheet fetch error:', e.message); }
+  }
+
+  const todaySubs = dateSubs;
   const approved = todaySubs.filter(s => s.status === 'approved');
   const flagged = todaySubs.filter(s => s.status === 'flagged');
   const totalAmt = approved.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
@@ -1360,7 +1470,10 @@ app.get('/admin', requireAdmin, (req, res) => {
 
   const pendingRows = pendingRiders.map(r => `
     <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid #f5f5f5;">
-      <span style="font-size:13px;">❌ ${r.name}</span>
+      <div>
+        <span style="font-size:13px;">❌ ${r.name}</span>
+        ${r.note ? `<span style="font-size:11px;color:#e65100;margin-left:6px;">📝 ${r.note}</span>` : ''}
+      </div>
       <span style="font-size:11px;color:#aaa;">${r.id}</span>
     </div>`).join('');
 
@@ -1422,6 +1535,7 @@ document.addEventListener('DOMContentLoaded', () => {
     <a href="/admin/riders">👥 Riders</a>
     <a href="/admin/export">⬇️ CSV</a>
     <a href="/admin/fuel-upload">⛽ Fuel</a>
+    <form method="POST" action="/admin/generate-monthly" style="margin:0;"><button type="submit" style="font-size:12px;padding:5px 10px;background:#1a73e8;color:#fff;border:none;border-radius:8px;cursor:pointer;">📊 Monthly</button></form>
     <a href="/admin/logout">🚪</a>
   </div>
 </div>
@@ -1572,6 +1686,15 @@ app.get('/admin/riders', requireAdmin, (req, res) => {
   </table>
 </div>
 </body></html>`);
+});
+
+app.post('/admin/riders/note/:id', requireAdmin, async (req, res) => {
+  const rider = riders.find(r => r.id === req.params.id);
+  if (rider) {
+    rider.note = req.body.note || '';
+    await saveRidersToSheet();
+  }
+  res.redirect('/admin/riders');
 });
 
 app.post('/admin/riders/add', requireAdmin, async (req, res) => {
