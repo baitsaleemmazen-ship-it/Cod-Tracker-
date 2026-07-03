@@ -269,22 +269,22 @@ async function ensureDailySheet(date) {
       const sheetId = addRes.data.replies[0].addSheet.properties.sheetId;
 
       // Write data: row1=company, row2=date, row3=headers, row4+=riders
-      const headers = ['#', 'Rider Name', 'Rider ID', 'Bank Amount (OMR)', 'Talabat Collected (OMR)', 'Bank', 'Submitted At', 'Status'];
-      const riderRows = riders.map((r, i) => [i + 1, r.name, r.id, '', '', '', '', 'Not Submitted']);
+      const headers = ['#', 'Rider Name', 'Rider ID', 'Orders', 'Talabat Collected (OMR)', 'Bank Amount (OMR)', 'Bank', 'Submitted At', 'Status'];
+      const riderRows = riders.map((r, i) => [i + 1, r.name, r.id, '', '', '', '', '', 'Not Submitted']);
+      const COLS = 9;
       await sheets.spreadsheets.values.update({
         spreadsheetId,
         range: `${sheetName}!A1`,
         valueInputOption: 'RAW',
         requestBody: { values: [
-          ['Future Wave', '', '', '', '', '', '', ''],
-          [displayDate, '', '', '', '', '', '', ''],
+          ['Future Wave', '', '', '', '', '', '', '', ''],
+          [displayDate, '', '', '', '', '', '', '', ''],
           ...([headers]),
           ...riderRows
         ]}
       });
 
       const totalRows = riders.length + 3;
-      const COLS = 8; // A-H
 
       await sheets.spreadsheets.batchUpdate({
         spreadsheetId,
@@ -412,14 +412,14 @@ async function fillRiderRow(submission) {
     if (rowIndex === -1) {
       // Rider not found — append at end
       await sheets.spreadsheets.values.append({
-        spreadsheetId, range: `${sheetName}!A:H`, valueInputOption: 'RAW',
-        requestBody: { values: [['', submission.rider_name, submission.rider_id, submission.amount || '', submission.talabat_amount || '', submission.bank || '', new Date(new Date(submission.submitted_at).getTime()+4*60*60*1000).toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit",hour12:true}), statusText]] }
+        spreadsheetId, range: `${sheetName}!A:I`, valueInputOption: 'RAW',
+        requestBody: { values: [['', submission.rider_name, submission.rider_id, submission.talabat_deliveries || '', submission.talabat_amount || '', submission.amount || '', submission.bank || '', new Date(new Date(submission.submitted_at).getTime()+4*60*60*1000).toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit",hour12:true}), statusText]] }
       });
     } else {
-      // Fill rider's existing row — columns D to H (Bank Amount, Talabat, Bank, Time, Status)
+      // Fill rider's existing row — columns D to I (Bank Amount, Talabat, Orders, Bank, Time, Status)
       await sheets.spreadsheets.values.update({
-        spreadsheetId, range: `${sheetName}!D${rowIndex}:H${rowIndex}`, valueInputOption: 'RAW',
-        requestBody: { values: [[submission.amount || '', submission.talabat_amount || '', submission.bank || '', new Date(new Date(submission.submitted_at).getTime()+4*60*60*1000).toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit",hour12:true}), statusText]] }
+        spreadsheetId, range: `${sheetName}!D${rowIndex}:I${rowIndex}`, valueInputOption: 'RAW',
+        requestBody: { values: [[submission.talabat_deliveries || '', submission.talabat_amount || '', submission.amount || '', submission.bank || '', new Date(new Date(submission.submitted_at).getTime()+4*60*60*1000).toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit",hour12:true}), statusText]] }
       });
 
       // Color the row — green if on time, yellow if late
@@ -471,96 +471,169 @@ function requireAdmin(req, res, next) {
 // ══════════════════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => {
   res.send(`<!DOCTYPE html><html lang="en"><head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>COD Receipt Submission</title>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>Future Wave — Rider Portal</title>
 <style>
-  *{box-sizing:border-box;margin:0;padding:0;}
-  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:1rem;}
-  .card{background:#fff;border-radius:16px;padding:1.5rem;width:100%;max-width:420px;box-shadow:0 2px 16px rgba(0,0,0,0.08);}
-  h1{font-size:20px;font-weight:600;margin-bottom:4px;}
-  .sub{font-size:13px;color:#888;margin-bottom:1.5rem;}
-  label{font-size:13px;font-weight:500;color:#444;display:block;margin-bottom:6px;}
-  .section{background:#f9f9f9;border-radius:12px;padding:1rem;margin-bottom:1rem;border:1px solid #eee;}
-  .section-title{font-size:14px;font-weight:600;margin-bottom:8px;}
-  select{width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:10px;font-size:14px;margin-bottom:1rem;background:#fafafa;}
-  .btn-row{display:flex;gap:8px;margin-bottom:8px;}
-  .btn-cam{flex:1;padding:12px;background:#1a73e8;color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;}
-  .btn-gal{flex:1;padding:12px;background:#fff;color:#1a73e8;border:2px solid #1a73e8;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;}
-  .preview-wrap{display:none;text-align:center;margin-top:6px;}
-  .preview-wrap img{max-width:100%;max-height:140px;border-radius:8px;}
-  .preview-wrap p{font-size:11px;color:#888;margin-top:4px;}
-  .checked{font-size:11px;color:#1e7e34;margin-top:4px;}
-  button[type=submit]{width:100%;padding:14px;background:#1a73e8;color:#fff;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;margin-top:0.5rem;}
-  button:disabled{background:#aaa;}
-  .msg{padding:12px;border-radius:10px;font-size:13px;text-align:center;margin-top:1rem;}
-  .msg.ok{background:#e6f4ea;color:#1e7e34;}
-  .msg.err{background:#fce8e6;color:#c62828;}
-  .spinner{display:none;text-align:center;padding:1rem;color:#888;font-size:13px;}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f0f2f5;min-height:100vh;}
+.header{background:#0d4d25;padding:16px 20px;display:flex;align-items:center;gap:10px;}
+.header h1{color:#fff;font-size:17px;font-weight:600;}
+.header .sub{color:rgba(255,255,255,0.7);font-size:12px;}
+.tabs{display:flex;background:#fff;border-bottom:1px solid #eee;position:sticky;top:0;z-index:10;}
+.tab{flex:1;padding:13px 8px;text-align:center;font-size:13px;font-weight:500;color:#888;cursor:pointer;border-bottom:3px solid transparent;transition:all 0.2s;}
+.tab.active{color:#0d4d25;border-bottom-color:#0d4d25;font-weight:600;}
+.tab-icon{font-size:16px;display:block;margin-bottom:2px;}
+.pane{display:none;padding:16px;max-width:480px;margin:0 auto;}
+.pane.active{display:block;}
+.card{background:#fff;border-radius:14px;padding:16px;margin-bottom:12px;box-shadow:0 1px 4px rgba(0,0,0,0.06);}
+.card-title{font-size:14px;font-weight:600;margin-bottom:12px;color:#222;}
+input[type=number],input[type=text]{width:100%;padding:12px;border:1.5px solid #ddd;border-radius:10px;font-size:16px;background:#fafafa;outline:none;}
+input:focus{border-color:#0d4d25;}
+.btn{width:100%;padding:13px;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;margin-top:10px;}
+.btn-primary{background:#0d4d25;color:#fff;}
+.btn-secondary{background:#e8f5e9;color:#0d4d25;}
+.btn:disabled{background:#ccc;color:#fff;}
+.btn-row{display:flex;gap:8px;margin-top:0;}
+.btn-half{flex:1;padding:12px;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;border:none;}
+.btn-cam{background:#0d4d25;color:#fff;}
+.btn-gal{background:#fff;color:#0d4d25;border:2px solid #0d4d25;}
+.preview{display:none;margin-top:8px;border-radius:10px;overflow:hidden;border:1px solid #eee;}
+.preview img{width:100%;max-height:160px;object-fit:cover;display:block;}
+.preview-name{font-size:11px;color:#1e7e34;padding:6px 10px;background:#f5f5f5;}
+.msg{padding:12px;border-radius:10px;font-size:13px;text-align:center;margin-top:10px;}
+.msg.ok{background:#e6f4ea;color:#1e7e34;}
+.msg.err{background:#fce8e6;color:#c62828;}
+.msg.warn{background:#fff3e0;color:#e65100;}
+.spinner{text-align:center;padding:14px;color:#888;font-size:13px;display:none;}
+/* Status styles */
+.status-card{border-radius:14px;padding:20px;text-align:center;margin-top:8px;}
+.status-card.approved{background:#e6f4ea;border:1px solid #b7dfbe;}
+.status-card.flagged{background:#fff3e0;border:1px solid #ffe0b2;}
+.status-card.rejected{background:#fce8e6;border:1px solid #f5c6c2;}
+.status-card.none{background:#f5f5f5;border:1px solid #eee;}
+.status-icon{font-size:44px;margin-bottom:8px;}
+.status-label{font-size:18px;font-weight:700;margin-bottom:4px;}
+.status-sub{font-size:13px;color:#666;line-height:1.5;}
+.status-amount{font-size:26px;font-weight:700;color:#1e7e34;margin-top:10px;}
+.status-time{font-size:11px;color:#aaa;margin-top:6px;}
+/* Fuel styles */
+.week-row{display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid #f0f0f0;}
+.week-row:last-child{border-bottom:none;}
+.week-label{font-size:13px;color:#555;}
+.week-amt{font-size:17px;font-weight:700;color:#0d4d25;}
+.week-amt.zero{color:#aaa;font-size:14px;font-weight:400;}
+.total-row{background:#0d4d25;border-radius:12px;padding:14px;display:flex;justify-content:space-between;align-items:center;margin-top:10px;}
+.total-label{color:rgba(255,255,255,0.8);font-size:13px;}
+.total-amt{color:#fff;font-size:22px;font-weight:700;}
+.rider-name-badge{background:#e8f5e9;color:#0d4d25;border-radius:8px;padding:8px 12px;font-size:14px;font-weight:600;margin-bottom:12px;display:inline-block;}
 </style></head><body>
-<div class="card">
-  <h1>📦 COD Receipt</h1>
-  <p class="sub">Submit your daily bank receipt and Talabat screenshot</p>
-  <form id="form">
-    <label>Your ID number</label>
-    <input type="number" name="rider_id" id="riderSel" required placeholder="Enter your ID number" style="width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:10px;font-size:16px;margin-bottom:1rem;background:#fafafa;">
 
-    <div class="section">
-      <div class="section-title">🏦 Bank Receipt</div>
-      <input type="file" id="bankInput" accept="image/*" onchange="previewFile(this,'bankPreview','bankName')" style="display:none">
-      <input type="file" id="bankCamera" accept="image/*" capture="environment" onchange="previewFile(this,'bankPreview','bankName')" style="display:none">
-      <div class="btn-row">
-        <button type="button" class="btn-cam" onclick="document.getElementById('bankCamera').click()">📷 Take Photo</button>
-        <button type="button" class="btn-gal" onclick="document.getElementById('bankInput').click()">🖼 Gallery</button>
-      </div>
-      <div class="preview-wrap" id="bankPreview">
-        <img id="bankImg" alt="bank receipt preview">
-        <p id="bankName"></p>
-      </div>
-    </div>
-
-    <div class="section">
-      <div class="section-title">🛵 Talabat Screenshot</div>
-      <input type="file" id="talabatInput" accept="image/*" onchange="previewFile(this,'talabatPreview','talabatName')" style="display:none">
-      <input type="file" id="talabatCamera" accept="image/*" capture="environment" onchange="previewFile(this,'talabatPreview','talabatName')" style="display:none">
-      <div class="btn-row">
-        <button type="button" class="btn-cam" onclick="document.getElementById('talabatCamera').click()">📷 Take Photo</button>
-        <button type="button" class="btn-gal" onclick="document.getElementById('talabatInput').click()">🖼 Gallery</button>
-      </div>
-      <div class="preview-wrap" id="talabatPreview">
-        <img id="talabatImg" alt="talabat preview">
-        <p id="talabatName"></p>
-      </div>
-    </div>
-
-    <button type="submit" id="submitBtn">Submit Receipt</button>
-  </form>
-  <div class="spinner" id="spinner">⏳ Reading your receipts...</div>
-  <div id="msg"></div>
+<div class="header">
+  <div>
+    <h1>🚚 Future Wave</h1>
+    <div class="sub">Rider Portal</div>
+  </div>
 </div>
+
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('submit')"><span class="tab-icon">📦</span>Submit</div>
+  <div class="tab" onclick="switchTab('status')"><span class="tab-icon">📋</span>Status</div>
+  <div class="tab" onclick="switchTab('fuel')"><span class="tab-icon">⛽</span>Fuel</div>
+</div>
+
+<!-- SUBMIT TAB -->
+<div class="pane active" id="pane-submit">
+  <div class="card">
+    <div class="card-title">Your ID</div>
+    <input type="number" id="riderSel" placeholder="Enter your rider ID" inputmode="numeric">
+  </div>
+  <div class="card">
+    <div class="card-title">🏦 Bank Receipt</div>
+    <input type="file" id="bankInput" accept="image/*" onchange="previewFile(this,'bankPreview','bankImg')" style="display:none">
+    <input type="file" id="bankCamera" accept="image/*" capture="environment" onchange="previewFile(this,'bankPreview','bankImg')" style="display:none">
+    <div class="btn-row">
+      <button type="button" class="btn-half btn-cam" onclick="document.getElementById('bankCamera').click()">📷 Camera</button>
+      <button type="button" class="btn-half btn-gal" onclick="document.getElementById('bankInput').click()">🖼 Gallery</button>
+    </div>
+    <div class="preview" id="bankPreview"><img id="bankImg" alt=""><div class="preview-name" id="bankName"></div></div>
+  </div>
+  <div class="card">
+    <div class="card-title">🛵 Talabat Screenshot</div>
+    <input type="file" id="talabatInput" accept="image/*" onchange="previewFile(this,'talabatPreview','talabatImg')" style="display:none">
+    <input type="file" id="talabatCamera" accept="image/*" capture="environment" onchange="previewFile(this,'talabatPreview','talabatImg')" style="display:none">
+    <div class="btn-row">
+      <button type="button" class="btn-half btn-cam" onclick="document.getElementById('talabatCamera').click()">📷 Camera</button>
+      <button type="button" class="btn-half btn-gal" onclick="document.getElementById('talabatInput').click()">🖼 Gallery</button>
+    </div>
+    <div class="preview" id="talabatPreview"><img id="talabatImg" alt=""><div class="preview-name" id="talabatName"></div></div>
+  </div>
+  <button class="btn btn-primary" id="submitBtn" onclick="doSubmit()">Submit Receipt</button>
+  <div class="spinner" id="submitSpinner">⏳ Reading your receipts, please wait...</div>
+  <div id="submitMsg"></div>
+</div>
+
+<!-- STATUS TAB -->
+<div class="pane" id="pane-status">
+  <div class="card">
+    <div class="card-title">Check today's submission</div>
+    <input type="number" id="statusId" placeholder="Enter your rider ID" inputmode="numeric">
+    <button class="btn btn-primary" onclick="doStatus()">Check status</button>
+  </div>
+  <div class="spinner" id="statusSpinner">Checking...</div>
+  <div id="statusResult"></div>
+</div>
+
+<!-- FUEL TAB -->
+<div class="pane" id="pane-fuel">
+  <div class="card">
+    <div class="card-title">Check your fuel allowance</div>
+    <input type="number" id="fuelId" placeholder="Enter your rider ID" inputmode="numeric">
+    <button class="btn btn-primary" onclick="doFuel()">Check fuel</button>
+  </div>
+  <div class="spinner" id="fuelSpinner">Loading...</div>
+  <div id="fuelResult"></div>
+</div>
+
 <script>
-function previewFile(input, wrapId, nameId) {
-  const file = input.files[0];
-  if (!file) return;
-  const imgId = wrapId === 'bankPreview' ? 'bankImg' : 'talabatImg';
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', ['submit','status','fuel'][i]===name));
+  document.querySelectorAll('.pane').forEach(p => p.classList.remove('active'));
+  document.getElementById('pane-'+name).classList.add('active');
+}
+
+function previewFile(input, wrapId, imgId) {
+  const file = input.files[0]; if (!file) return;
   const reader = new FileReader();
   reader.onload = e => {
     document.getElementById(imgId).src = e.target.result;
     document.getElementById(wrapId).style.display = 'block';
-    document.getElementById(nameId).textContent = '✓ ' + file.name;
+    const nameEl = document.getElementById(wrapId.replace('Preview','Name'));
+    if (nameEl) nameEl.textContent = '✓ ' + file.name;
   };
   reader.readAsDataURL(file);
 }
-document.getElementById('form').onsubmit = async e => {
-  e.preventDefault();
-  const riderId = document.getElementById('riderSel').value;
+
+async function doSubmit() {
+  const riderId = document.getElementById('riderSel').value.trim();
   const bankFile = document.getElementById('bankInput').files[0] || document.getElementById('bankCamera').files[0];
   const talabatFile = document.getElementById('talabatInput').files[0] || document.getElementById('talabatCamera').files[0];
-  if (!riderId) { showMsg('Please select your name.', 'err'); return; }
-  if (!bankFile) { showMsg('Please upload your bank receipt.', 'err'); return; }
-  if (!talabatFile) { showMsg('Please upload your Talabat screenshot.', 'err'); return; }
+  const msgEl = document.getElementById('submitMsg');
+  msgEl.innerHTML = '';
+  if (!riderId) { msgEl.innerHTML = '<div class="msg err">Please enter your ID number.</div>'; return; }
+  if (!bankFile) { msgEl.innerHTML = '<div class="msg err">Please upload your bank receipt.</div>'; return; }
+  if (!talabatFile) { msgEl.innerHTML = '<div class="msg err">Please upload your Talabat screenshot.</div>'; return; }
   document.getElementById('submitBtn').disabled = true;
-  document.getElementById('spinner').style.display = 'block';
-  document.getElementById('msg').innerHTML = '';
+  document.getElementById('submitSpinner').style.display = 'block';
+  try {
+    const chk = await fetch('/check-submitted?id=' + encodeURIComponent(riderId));
+    const chkData = await chk.json();
+    if (chkData.submitted) {
+      document.getElementById('submitSpinner').style.display = 'none';
+      document.getElementById('submitBtn').disabled = false;
+      msgEl.innerHTML = '<div class="msg warn">⚠️ You already submitted today. Check the Status tab to see your result.</div>';
+      return;
+    }
+  } catch(e) {}
   const fd = new FormData();
   fd.append('rider_id', riderId);
   fd.append('receipt', bankFile);
@@ -568,26 +641,70 @@ document.getElementById('form').onsubmit = async e => {
   try {
     const res = await fetch('/submit', { method: 'POST', body: fd });
     const data = await res.json();
-    document.getElementById('spinner').style.display = 'none';
+    document.getElementById('submitSpinner').style.display = 'none';
     if (data.ok) {
-      document.getElementById('form').style.display = 'none';
-      showMsg('✅ Submitted successfully! Thank you.', 'ok');
+      document.getElementById('submitBtn').style.display = 'none';
+      document.querySelectorAll('.card').forEach(c => c.style.display = 'none');
+      msgEl.innerHTML = '<div class="msg ok" style="padding:20px;font-size:15px;">✅ Submitted successfully!<br><span style="font-size:13px;color:#555;margin-top:4px;display:block;">Check the Status tab to track your submission.</span></div>';
     } else {
-      showMsg('❌ ' + (data.error || 'Error. Please try again.'), 'err');
+      msgEl.innerHTML = '<div class="msg err">❌ ' + (data.error || 'Error. Please try again.') + '</div>';
       document.getElementById('submitBtn').disabled = false;
     }
-  } catch(err) {
-    document.getElementById('spinner').style.display = 'none';
-    showMsg('❌ Network error. Please try again.', 'err');
+  } catch(e) {
+    document.getElementById('submitSpinner').style.display = 'none';
+    msgEl.innerHTML = '<div class="msg err">❌ Network error. Please try again.</div>';
     document.getElementById('submitBtn').disabled = false;
   }
-};
-function showMsg(text, type) {
-  document.getElementById('msg').innerHTML = '<div class="msg ' + type + '">' + text + '</div>';
 }
+
+async function doStatus() {
+  const id = document.getElementById('statusId').value.trim();
+  if (!id) return;
+  document.getElementById('statusSpinner').style.display = 'block';
+  document.getElementById('statusResult').innerHTML = '';
+  const res = await fetch('/status/check?id=' + encodeURIComponent(id));
+  const data = await res.json();
+  document.getElementById('statusSpinner').style.display = 'none';
+  const el = document.getElementById('statusResult');
+  if (!data.found) {
+    el.innerHTML = '<div class="status-card none"><div class="status-icon">📭</div><div class="status-label">No submission today</div><div class="status-sub">You have not submitted yet today.</div></div>';
+    return;
+  }
+  const map = {
+    approved: {icon:'✅', label:'Approved', sub:'Your submission has been approved.', cls:'approved'},
+    flagged:  {icon:'⏳', label:'Under Review', sub:'Being reviewed by supervisor.', cls:'flagged'},
+    rejected: {icon:'❌', label:'Rejected', sub:'Your submission was rejected.' + (data.reason ? '<br><b>Reason: '+data.reason+'</b>' : ''), cls:'rejected'}
+  };
+  const m = map[data.status] || {icon:'📄', label:data.status, sub:'', cls:'none'};
+  el.innerHTML = '<div class="status-card '+m.cls+'"><div class="status-icon">'+m.icon+'</div><div class="status-label">'+m.label+'</div><div class="status-sub">'+m.sub+'</div>'+(data.amount?'<div class="status-amount">'+data.amount+' OMR</div>':'')+'<div class="status-time">Submitted at '+data.time+'</div></div>';
+}
+
+async function doFuel() {
+  const id = document.getElementById('fuelId').value.trim();
+  if (!id) return;
+  document.getElementById('fuelSpinner').style.display = 'block';
+  document.getElementById('fuelResult').innerHTML = '';
+  const res = await fetch('/fuel/check?id=' + encodeURIComponent(id));
+  const data = await res.json();
+  document.getElementById('fuelSpinner').style.display = 'none';
+  const el = document.getElementById('fuelResult');
+  if (!data.ok) {
+    el.innerHTML = '<div class="msg err">'+data.error+'</div>'; return;
+  }
+  const total = data.weeks.reduce((s,w) => s+(parseFloat(w.amount)||0), 0);
+  const rows = data.weeks.map(w => '<div class="week-row"><div class="week-label">📅 '+w.week+'</div><div class="week-amt '+(parseFloat(w.amount)>0?'':'zero')+'">'+( parseFloat(w.amount)>0 ? w.amount+' OMR' : '—')+'</div></div>').join('');
+  el.innerHTML = '<div class="card"><div class="rider-name-badge">👤 '+data.rider_name+'</div>'+rows+(data.weeks.length>1?'<div class="total-row"><div class="total-label">Total</div><div class="total-amt">'+total.toFixed(3)+' OMR</div></div>':'')+'</div>';
+}
+
+// Auto-fill status/fuel ID from submit tab
+document.getElementById('riderSel').addEventListener('input', e => {
+  document.getElementById('statusId').value = e.target.value;
+  document.getElementById('fuelId').value = e.target.value;
+});
 </script>
 </body></html>`);
 });
+
 
 // ─── Submit endpoint ──────────────────────────────────────────────────────────
 app.post('/submit', uploadBoth, async (req, res) => {
@@ -931,16 +1048,28 @@ async function generateFuelSheet() {
     const weekEnd = sunday.toISOString().slice(0,10);
     const tabName = `Fuel ${weekStart} to ${weekEnd}`;
 
-    // Collect deliveries per rider from submissions this week
-    const weekSubs = submissions.filter(s => s.date >= weekStart && s.date <= weekEnd && s.status === 'approved');
+    // Read deliveries from Submissions sheet (column G=date, B=rider_id, C=rider_name, I=status, Q=deliveries)
+    const subsRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Submissions!A:Q' });
+    const subsRows = (subsRes.data.values || []).slice(1);
+
+    // Filter approved submissions within the week range
+    const weekRows = subsRows.filter(r => {
+      const date = r[6]; // column G
+      const status = r[8]; // column I
+      return date && date >= weekStart && date <= weekEnd && status === 'approved';
+    });
 
     // Sum deliveries per rider
     const riderDeliveries = {};
-    weekSubs.forEach(s => {
-      if (!riderDeliveries[s.rider_id]) {
-        riderDeliveries[s.rider_id] = { name: s.rider_name, id: s.rider_id, deliveries: 0 };
+    weekRows.forEach(r => {
+      const riderId = r[1]; // column B
+      const riderName = r[2]; // column C
+      const deliveries = parseInt(r[16]) || 0; // column Q
+      if (!riderId) return;
+      if (!riderDeliveries[riderId]) {
+        riderDeliveries[riderId] = { name: riderName, id: riderId, deliveries: 0 };
       }
-      riderDeliveries[s.rider_id].deliveries += (parseInt(s.talabat_deliveries) || 0);
+      riderDeliveries[riderId].deliveries += deliveries;
     });
 
     // Build rows for all riders
@@ -1049,12 +1178,100 @@ async function generateFuelSheet() {
   } catch(e) { console.error('generateFuelSheet error:', e.message); }
 }
 
+async function generatePerformanceSheet() {
+  try {
+    const { sheets, spreadsheetId } = await getSheetAuth();
+    const now = new Date(new Date().getTime() + 4*60*60*1000);
+    const sunday = new Date(now);
+    const monday = new Date(now);
+    monday.setDate(sunday.getDate() - 6);
+    const weekStart = monday.toISOString().slice(0,10);
+    const weekEnd = sunday.toISOString().slice(0,10);
+    const tabName = `Perf ${weekStart} to ${weekEnd}`;
+
+    const meta = await sheets.spreadsheets.get({ spreadsheetId });
+    if (meta.data.sheets.map(s => s.properties.title).includes(tabName)) return;
+
+    // Read from Submissions sheet
+    const subsRes = await sheets.spreadsheets.values.get({ spreadsheetId, range: 'Submissions!A:Q' });
+    const subsRows = (subsRes.data.values || []).slice(1);
+    const weekRows = subsRows.filter(r => r[6] && r[6] >= weekStart && r[6] <= weekEnd);
+
+    // Build per-rider stats
+    const riderStats = {};
+    riders.forEach(r => {
+      riderStats[r.id] = { name: r.name, id: r.id, days: 0, orders: 0, submitted: false };
+    });
+    weekRows.forEach(r => {
+      const id = r[1];
+      if (!riderStats[id]) riderStats[id] = { name: r[2], id, days: 0, orders: 0 };
+      riderStats[id].days++;
+      riderStats[id].orders += (parseInt(r[16]) || 0);
+      riderStats[id].submitted = true;
+    });
+
+    const COLS = 6;
+    const riderRows = riders.map((r, i) => {
+      const s = riderStats[r.id] || { days: 0, orders: 0, submitted: false };
+      const flag = !s.submitted ? '🔴 Did not work' : s.orders < 75 ? '⚠️ Low orders' : '✅ Good';
+      return [i + 1, r.name, r.id, s.days, s.orders, flag];
+    });
+
+    const addRes = await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: { requests: [{ addSheet: { properties: { title: tabName } } }] }
+    });
+    const sheetId = addRes.data.replies[0].addSheet.properties.sheetId;
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId, range: `${tabName}!A1`, valueInputOption: 'RAW',
+      requestBody: { values: [
+        ['Future Wave', '', '', '', '', ''],
+        [`Performance — ${weekStart} to ${weekEnd}`, '', '', '', '', ''],
+        ['#', 'Rider Name', 'Rider ID', 'Days Worked', 'Total Orders', 'Performance'],
+        ...riderRows
+      ]}
+    });
+
+    const totalRows = riders.length + 3;
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: { requests: [
+        { mergeCells: { range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: COLS }, mergeType: 'MERGE_ALL' } },
+        { mergeCells: { range: { sheetId, startRowIndex: 1, endRowIndex: 2, startColumnIndex: 0, endColumnIndex: COLS }, mergeType: 'MERGE_ALL' } },
+        { repeatCell: { range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: COLS },
+          cell: { userEnteredFormat: { backgroundColor: { red: 0.067, green: 0.31, blue: 0.165 }, horizontalAlignment: 'CENTER',
+            textFormat: { foregroundColor: { red: 1, green: 1, blue: 1 }, bold: true, fontSize: 16 } } }, fields: 'userEnteredFormat' }},
+        { repeatCell: { range: { sheetId, startRowIndex: 1, endRowIndex: 2, startColumnIndex: 0, endColumnIndex: COLS },
+          cell: { userEnteredFormat: { backgroundColor: { red: 0.851, green: 0.918, blue: 0.863 }, horizontalAlignment: 'CENTER',
+            textFormat: { foregroundColor: { red: 0.067, green: 0.31, blue: 0.165 }, bold: true, fontSize: 12 } } }, fields: 'userEnteredFormat' }},
+        { repeatCell: { range: { sheetId, startRowIndex: 2, endRowIndex: 3, startColumnIndex: 0, endColumnIndex: COLS },
+          cell: { userEnteredFormat: { backgroundColor: { red: 0.067, green: 0.31, blue: 0.165 }, horizontalAlignment: 'CENTER',
+            textFormat: { foregroundColor: { red: 1, green: 1, blue: 1 }, bold: true, fontSize: 11 } } }, fields: 'userEnteredFormat' }},
+        // Color rows by performance
+        ...riderRows.map((row, i) => {
+          const flag = row[5];
+          const bg = flag.includes('Did not work') ? { red: 0.957, green: 0.8, blue: 0.8 }
+            : flag.includes('Low orders') ? { red: 1.0, green: 0.953, blue: 0.714 }
+            : { red: 0.714, green: 0.918, blue: 0.757 };
+          return { repeatCell: { range: { sheetId, startRowIndex: 3+i, endRowIndex: 4+i, startColumnIndex: 0, endColumnIndex: COLS },
+            cell: { userEnteredFormat: { backgroundColor: bg, horizontalAlignment: 'CENTER', textFormat: { fontSize: 10 } } }, fields: 'userEnteredFormat' }};
+        }),
+        { updateDimensionProperties: { range: { sheetId, dimension: 'ROWS', startIndex: 0, endIndex: 1 }, properties: { pixelSize: 45 }, fields: 'pixelSize' } },
+        { updateDimensionProperties: { range: { sheetId, dimension: 'ROWS', startIndex: 1, endIndex: totalRows }, properties: { pixelSize: 25 }, fields: 'pixelSize' } },
+        { updateDimensionProperties: { range: { sheetId, dimension: 'COLUMNS', startIndex: 1, endIndex: 2 }, properties: { pixelSize: 180 }, fields: 'pixelSize' } },
+        { updateDimensionProperties: { range: { sheetId, dimension: 'COLUMNS', startIndex: 5, endIndex: 6 }, properties: { pixelSize: 150 }, fields: 'pixelSize' } },
+      ]}
+    });
+    console.log(`Performance sheet generated: ${tabName}`);
+  } catch(e) { console.error('generatePerformanceSheet error:', e.message); }
+}
+
 function scheduleWeeklyFuel() {
   const now = new Date();
   const gmt4 = new Date(now.getTime() + 4*60*60*1000);
   const next = new Date(gmt4);
-  // Find next Sunday at 8 PM
-  const dayOfWeek = gmt4.getDay(); // 0=Sun
+  const dayOfWeek = gmt4.getDay();
   const daysUntilSunday = dayOfWeek === 0 ? 0 : 7 - dayOfWeek;
   next.setDate(gmt4.getDate() + daysUntilSunday);
   next.setHours(20, 0, 0, 0);
@@ -1062,6 +1279,7 @@ function scheduleWeeklyFuel() {
   const msUntil = next - gmt4;
   setTimeout(async () => {
     await generateFuelSheet();
+    await generatePerformanceSheet();
     scheduleWeeklyFuel();
   }, msUntil);
   console.log(`Fuel sheet scheduled for: ${next.toISOString()}`);
@@ -1070,6 +1288,7 @@ scheduleWeeklyFuel();
 
 app.post('/admin/generate-fuel', requireAdmin, async (req, res) => {
   generateFuelSheet().catch(e => console.error('Fuel sheet error:', e.message));
+  generatePerformanceSheet().catch(e => console.error('Performance sheet error:', e.message));
   res.redirect('/admin?fuel=generating');
 });
 
@@ -1122,7 +1341,11 @@ app.get('/admin', requireAdmin, (req, res) => {
             </div>
           </form>
           <div style="display:flex;gap:4px;margin-top:3px;">
-            ${s.status === 'flagged' ? `<form method="POST" action="/admin/reject/${s.id}" style="margin:0;"><button class="act-btn rej-btn">✗ Reject</button></form>` : ''}
+            ${s.status === 'flagged' ? `
+            <form method="POST" action="/admin/reject/${s.id}" style="margin:3px 0 0;">
+              <input name="reason" type="text" placeholder="Rejection reason..." style="width:100%;padding:3px 7px;border:1px solid #ddd;border-radius:6px;font-size:11px;margin-bottom:3px;">
+              <button class="act-btn rej-btn">✗ Reject</button>
+            </form>` : ''}
             <form method="POST" action="/admin/delete/${s.id}" onsubmit="return confirm('Delete?')" style="margin:0;"><button class="act-btn" style="background:#f5f5f5;color:#888;">🗑</button></form>
           </div>` :
           `<div style="margin-top:3px;display:flex;gap:4px;flex-wrap:wrap;align-items:center;">
@@ -1291,6 +1514,7 @@ app.post('/admin/reject/:id', requireAdmin, (req, res) => {
   const sub = submissions.find(s => s.id === req.params.id);
   if (sub) {
     sub.status = 'rejected';
+    sub.rejection_reason = req.body.reason || '';
     saveSubmissions();
     updateSubmissionInSheet(sub).catch(e => console.error(e.message));
   }
@@ -1520,6 +1744,74 @@ app.post('/admin/fuel-upload', requireAdmin, uploadFuel.single('fuel_file'), asy
   }
 });
 
+
+// ─── Rider status page ────────────────────────────────────────────────────────
+app.get('/status', (req, res) => {
+  res.send(`<!DOCTYPE html><html><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Submission Status</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:1rem;}
+  .card{background:#fff;border-radius:16px;padding:1.5rem;width:100%;max-width:400px;box-shadow:0 2px 16px rgba(0,0,0,0.08);}
+  h1{font-size:20px;font-weight:600;margin-bottom:4px;}
+  .sub{font-size:13px;color:#888;margin-bottom:1.5rem;}
+  input{width:100%;padding:12px;border:1px solid #ddd;border-radius:10px;font-size:16px;margin-bottom:1rem;background:#fafafa;}
+  button{width:100%;padding:12px;background:#1a73e8;color:#fff;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;}
+  .result{margin-top:1.25rem;border-radius:12px;padding:1.25rem;text-align:center;}
+  .approved{background:#e6f4ea;border:1px solid #b7dfbe;}
+  .flagged{background:#fff3e0;border:1px solid #ffe0b2;}
+  .rejected{background:#fce8e6;border:1px solid #f5c6c2;}
+  .none{background:#f5f5f5;border:1px solid #eee;}
+  .icon{font-size:40px;margin-bottom:8px;}
+  .status-text{font-size:16px;font-weight:600;margin-bottom:4px;}
+  .status-sub{font-size:13px;color:#666;}
+  .amount{font-size:24px;font-weight:700;margin-top:10px;color:#1e7e34;}
+</style></head><body>
+<div class="card">
+  <h1>📋 Submission Status</h1>
+  <p class="sub">Enter your ID to check today's submission</p>
+  <input type="number" id="riderId" placeholder="Enter your rider ID" inputmode="numeric">
+  <button onclick="checkStatus()">Check status</button>
+  <div id="result"></div>
+</div>
+<script>
+async function checkStatus() {
+  const id = document.getElementById('riderId').value.trim();
+  if (!id) return;
+  document.getElementById('result').innerHTML = '<div style="text-align:center;padding:1rem;color:#888;font-size:13px;">Checking...</div>';
+  const res = await fetch('/status/check?id=' + encodeURIComponent(id));
+  const data = await res.json();
+  const el = document.getElementById('result');
+  if (!data.found) {
+    el.innerHTML = '<div class="result none"><div class="icon">📭</div><div class="status-text">No submission today</div><div class="status-sub">You have not submitted yet today.</div></div>';
+    return;
+  }
+  const icons = {approved:'✅',flagged:'⏳',rejected:'❌'};
+  const texts = {approved:'Approved',flagged:'Under Review',rejected:'Rejected'};
+  const subs = {approved:'Your submission has been approved.',flagged:'Your submission is being reviewed.',rejected:'Your submission was rejected.' + (data.reason ? '<br><b>Reason: '+data.reason+'</b>' : '')};
+  el.innerHTML = '<div class="result '+data.status+'"><div class="icon">'+icons[data.status]+'</div><div class="status-text">'+texts[data.status]+'</div><div class="status-sub">'+subs[data.status]+'</div>'+(data.amount?'<div class="amount">'+data.amount+' OMR</div>':'')+'<div class="status-sub" style="margin-top:8px;font-size:11px;color:#aaa;">Submitted at '+data.time+'</div></div>';
+}
+document.getElementById('riderId').addEventListener('keypress', e => { if(e.key==='Enter') checkStatus(); });
+</script></body></html>`);
+});
+
+app.get('/status/check', (req, res) => {
+  const { id } = req.query;
+  const today = new Date(new Date().getTime() + 4*60*60*1000).toISOString().slice(0,10);
+  const sub = submissions.find(s => s.rider_id === id && s.date === today);
+  if (!sub) return res.json({ found: false });
+  return res.json({ found: true, status: sub.status, amount: sub.amount || null,
+    time: new Date(new Date(sub.submitted_at).getTime() + 4*60*60*1000).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:true}),
+    reason: sub.rejection_reason || null });
+});
+
+app.get('/check-submitted', (req, res) => {
+  const { id } = req.query;
+  const today = new Date(new Date().getTime() + 4*60*60*1000).toISOString().slice(0,10);
+  const sub = submissions.find(s => s.rider_id === id && s.date === today);
+  res.json({ submitted: !!sub, status: sub ? sub.status : null });
+});
 
 app.get('/fuel', (req, res) => {
   res.send(`<!DOCTYPE html><html lang="en"><head>
