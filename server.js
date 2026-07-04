@@ -398,7 +398,9 @@ async function fillRiderRow(submission) {
     const idCol = res.data.values || [];
 
     const isLate = submission.is_late || false;
-    const statusText = isLate ? 'Late' : 'Submitted';
+    const statusText = submission.status === 'flagged' ? (isLate ? 'Flagged - Late' : 'Flagged')
+      : submission.status === 'rejected' ? 'Rejected'
+      : isLate ? 'Late' : 'Submitted';
 
     // Find rider row by ID in column C — data starts at row index 3 (row 4 in sheet)
     let rowIndex = -1;
@@ -438,12 +440,12 @@ async function fillRiderRow(submission) {
         await sheets.spreadsheets.batchUpdate({
           spreadsheetId,
           requestBody: { requests: [
-            // Color columns A-G (data columns)
-            { repeatCell: { range: { sheetId, startRowIndex: rowIdx, endRowIndex: rowIdx + 1, startColumnIndex: 0, endColumnIndex: 7 },
+            // Color columns A-H (data columns)
+            { repeatCell: { range: { sheetId, startRowIndex: rowIdx, endRowIndex: rowIdx + 1, startColumnIndex: 0, endColumnIndex: 8 },
               cell: { userEnteredFormat: { backgroundColor: bgColor, textFormat: { foregroundColor: textColor, fontSize: 10 }, horizontalAlignment: 'CENTER' } },
               fields: 'userEnteredFormat' }},
-            // Status column H
-            { repeatCell: { range: { sheetId, startRowIndex: rowIdx, endRowIndex: rowIdx + 1, startColumnIndex: 7, endColumnIndex: 8 },
+            // Status column I
+            { repeatCell: { range: { sheetId, startRowIndex: rowIdx, endRowIndex: rowIdx + 1, startColumnIndex: 8, endColumnIndex: 9 },
               cell: { userEnteredFormat: {
                 backgroundColor: statusBg,
                 horizontalAlignment: 'CENTER',
@@ -903,10 +905,8 @@ Return ONLY this JSON, no markdown:
     // Store in memory for instant display
     imageStore[submission.id] = { bankB64, bankMediaType, talabatB64, talabatMediaType };
 
-    // Auto-write to sheet if approved and amount known
-    if (status === 'approved' && aiResult.amount) {
-      fillRiderRow(submission).catch(e => console.error('fillRiderRow error:', e.message));
-    }
+    // Always fill sheet row — approved, flagged, all statuses
+    fillRiderRow(submission).catch(e => console.error('fillRiderRow error:', e.message));
 
     // Respond to rider immediately — don't wait for Cloudinary
     res.json({ ok: true });
