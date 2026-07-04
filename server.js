@@ -7,8 +7,8 @@ const Anthropic = require('@anthropic-ai/sdk');
 const fs = require('fs');
 const path = require('path');
 let cloudinary, XLSX;
-try { cloudinary = require('cloudinary').v2; } catch(e) { console.error('cloudinary not installed'); }
-try { XLSX = require('xlsx'); } catch(e) { console.error('xlsx not installed'); }
+try { cloudinary = require('cloudinary').v2; } catch(e) { console.warn('cloudinary not installed - images will use memory only'); }
+try { XLSX = require('xlsx'); } catch(e) { console.warn('xlsx not installed - fuel upload disabled'); }
 
 // ─── Cloudinary config ────────────────────────────────────────────────────────
 if (cloudinary) {
@@ -900,38 +900,51 @@ Return ONLY this JSON, no markdown:
 
     submissions.push(submission);
     saveSubmissions();
-    saveSubmissionToSheet(submission).catch(e => console.error('saveSubmissionToSheet error:', e.message));
 
-    // Store in memory for instant display
+    // Store images in memory for instant display
     imageStore[submission.id] = { bankB64, bankMediaType, talabatB64, talabatMediaType };
 
-    // Always fill sheet row — approved, flagged, all statuses
-    fillRiderRow(submission).catch(e => console.error('fillRiderRow error:', e.message));
-
-    // Respond to rider immediately — don't wait for Cloudinary
+    // Respond to rider immediately
     res.json({ ok: true });
 
-    // Upload to Cloudinary in background after responding
-    if (cloudinary) {
-      const riderSafeName = (riderObj.name || 'unknown').replace(/[^a-zA-Z0-9]/g, '_');
-      Promise.all([
-        uploadToCloudinary(bankB64, bankMediaType, today, `${submission.id}_${riderSafeName}_bank`),
-        uploadToCloudinary(talabatB64, talabatMediaType, today, `${submission.id}_${riderSafeName}_talabat`)
-      ]).then(([bankUrl, talabatUrl]) => {
-        if (bankUrl) { submission.bank_url = bankUrl; }
-        if (talabatUrl) { submission.talabat_url = talabatUrl; }
-        if (bankUrl || talabatUrl) {
-          saveSubmissions();
-          updateSubmissionInSheet(submission).catch(e => console.error('updateSubmissionInSheet error:', e.message));
-        }
-      }).catch(e => console.error('Cloudinary background upload error:', e.message));
-    }
+    // All sheet/cloud operations in background after response
+    (async () => {
+      try {
+        // 1. Save to Submissions tab first
+        await saveSubmissionToSheet(submission);
+        console.log(`✅ Saved to Submissions sheet: ${submission.rider_name}`);
+      } catch(e) { console.error('saveSubmissionToSheet failed:', e.message); }
 
-    // WhatsApp alert in background
-    const waMsg = status === 'flagged'
-      ? `⚠️ *COD Alert — Flagged*\nRider: ${riderObj.name}\nAmount: ${aiResult.amount ? aiResult.amount + ' OMR' : 'Not detected'}\nReason: ${flags.join(', ')}`
-      : `✅ *COD Submitted*\nRider: ${riderObj.name}\nAmount: ${aiResult.amount ? aiResult.amount + ' OMR' : 'Not detected'}${isLate ? '\n⏰ LATE submission' : ''}`;
-    sendWhatsApp(waMsg);
+      try {
+        // 2. Fill daily sheet row
+        await fillRiderRow(submission);
+        console.log(`✅ Filled daily row: ${submission.rider_name}`);
+      } catch(e) { console.error('fillRiderRow failed:', e.message); }
+
+      // 3. Cloudinary upload (non-blocking, best effort)
+      if (cloudinary) {
+        try {
+          const riderSafeName = (riderObj.name || 'unknown').replace(/[^a-zA-Z0-9]/g, '_');
+          const [bankUrl, talabatUrl] = await Promise.all([
+            uploadToCloudinary(bankB64, bankMediaType, today, `${submission.id}_${riderSafeName}_bank`),
+            uploadToCloudinary(talabatB64, talabatMediaType, today, `${submission.id}_${riderSafeName}_talabat`)
+          ]);
+          if (bankUrl) submission.bank_url = bankUrl;
+          if (talabatUrl) submission.talabat_url = talabatUrl;
+          if (bankUrl || talabatUrl) {
+            saveSubmissions();
+            await updateSubmissionInSheet(submission);
+            console.log(`✅ Cloudinary uploaded: ${submission.rider_name}`);
+          }
+        } catch(e) { console.error('Cloudinary upload failed:', e.message); }
+      }
+
+      // 4. WhatsApp alert
+      const waMsg = status === 'flagged'
+        ? `⚠️ *COD Alert — Flagged*\nRider: ${riderObj.name}\nAmount: ${aiResult.amount ? aiResult.amount + ' OMR' : 'Not detected'}\nReason: ${flags.join(', ')}`
+        : `✅ *COD Submitted*\nRider: ${riderObj.name}\nAmount: ${aiResult.amount ? aiResult.amount + ' OMR' : 'Not detected'}${isLate ? '\n⏰ LATE submission' : ''}`;
+      sendWhatsApp(waMsg);
+    })();
   } catch (e) {
     console.error(e);
     res.json({ ok: false, error: 'Server error.' });
@@ -1712,7 +1725,10 @@ app.post('/admin/riders/delete/:id', requireAdmin, async (req, res) => {
   res.redirect('/admin/riders');
 });
 
-// ─── Debug endpoint ───────────────────────────────────────────────────────────
+// ─── Health check (Railway uses this) ────────────────────────────────────────
+app.get('/health', (req, res) => res.json({ status: 'ok', submissions: submissions.length, riders: riders.length }));
+
+
 app.get('/admin/debug', requireAdmin, (req, res) => {
   const today = new Date(new Date().getTime() + 4*60*60*1000).toISOString().slice(0,10);
   res.json({
@@ -2026,10 +2042,19 @@ app.get('/fuel/check', async (req, res) => {
 
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`COD Tracker running on port ${PORT}`);
-  getSheetAuth().then(async () => {
+app.listen(PORT, async () => {
+  console.log(`🚀 COD Tracker running on port ${PORT} (Railway)`);
+  console.log(`📦 Submissions in memory: ${submissions.length}`);
+  console.log(`👥 Riders in memory: ${riders.length}`);
+
+  // On Railway, files persist — sheet load is just a sync/backup
+  try {
     await loadRidersFromSheet();
+    console.log(`✅ Riders synced from sheet: ${riders.length}`);
+  } catch(e) { console.error('Riders sheet sync error:', e.message); }
+
+  try {
     await loadTodaySubmissionsFromSheet();
-  }).catch(e => console.error('Startup sheet error:', e.message));
+    console.log(`✅ Submissions synced from sheet: ${submissions.length}`);
+  } catch(e) { console.error('Submissions sheet sync error:', e.message); }
 });
