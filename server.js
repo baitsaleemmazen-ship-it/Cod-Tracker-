@@ -724,6 +724,8 @@ app.post('/submit', uploadBoth, async (req, res) => {
     const today = new Date(new Date().getTime() + 4*60*60*1000).toISOString().slice(0, 10);
     const todayIds = getTodayIds();
     const isDuplicate = todayIds.has(rider_id);
+    const flags = [];
+    let status = 'approved';
 
     // Flag if ID not in rider list
     if (!rider) {
@@ -800,8 +802,6 @@ Return ONLY this JSON, no markdown:
     }
 
     // Fraud checks — only flag for real fraud, not AI reading issues
-    const flags = [];
-    let status = 'approved';
 
     // Transaction success check
     if (aiResult.transaction_successful === false) {
