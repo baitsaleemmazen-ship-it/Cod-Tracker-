@@ -1032,7 +1032,7 @@ function scheduleDailySummary() {
   const next610pm = new Date(gmt4);
   next610pm.setHours(18, 10, 0, 0);
   if (gmt4 >= next610pm) next610pm.setDate(next610pm.getDate() + 1);
-  const msUntil = next610pm - gmt4;
+  const msUntil = Math.min(next610pm - gmt4, 2147483647); // cap at max 32-bit int
   setTimeout(async () => {
     const today = new Date(new Date().getTime() + 4*60*60*1000).toISOString().slice(0,10);
     const todaySubs = submissions.filter(s => s.date === today);
@@ -1288,17 +1288,16 @@ function scheduleWeeklyFuel() {
   const gmt4 = new Date(now.getTime() + 4*60*60*1000);
   const next = new Date(gmt4);
   const dayOfWeek = gmt4.getDay();
-  const daysUntilSunday = dayOfWeek === 0 ? 0 : 7 - dayOfWeek;
+  const daysUntilSunday = dayOfWeek === 0 ? 7 : 7 - dayOfWeek; // always next Sunday, never today
   next.setDate(gmt4.getDate() + daysUntilSunday);
   next.setHours(20, 0, 0, 0);
-  if (gmt4 >= next) next.setDate(next.getDate() + 7);
-  const msUntil = next - gmt4;
+  const msUntil = Math.min(Math.max(next - gmt4, 1000), 2147483647);
+  console.log(`⛽ Fuel sheet scheduled in ${Math.round(msUntil/3600000)}h`);
   setTimeout(async () => {
     await generateFuelSheet();
     await generatePerformanceSheet();
     scheduleWeeklyFuel();
   }, msUntil);
-  console.log(`Fuel sheet scheduled for: ${next.toISOString()}`);
 }
 scheduleWeeklyFuel();
 
@@ -1369,13 +1368,16 @@ async function generateMonthlyReport(yearMonth) {
 function scheduleMonthlyReport() {
   const now = new Date();
   const gmt4 = new Date(now.getTime() + 4*60*60*1000);
-  const next = new Date(gmt4);
-  next.setMonth(next.getMonth()+1); next.setDate(1); next.setHours(20,0,0,0);
+  const next = new Date(gmt4.getFullYear(), gmt4.getMonth() + 1, 1, 20, 0, 0, 0); // 1st of next month 8PM
+  const msUntil = Math.min(Math.max(next - gmt4, 1000), 2147483647);
+  console.log(`📊 Monthly report scheduled in ${Math.round(msUntil/3600000)}h`);
   setTimeout(async () => {
-    const prev = new Date(new Date().getTime()+4*60*60*1000); prev.setDate(0);
-    await generateMonthlyReport(`${prev.getFullYear()}-${String(prev.getMonth()+1).padStart(2,'0')}`);
+    const t = new Date(new Date().getTime() + 4*60*60*1000);
+    const prev = new Date(t.getFullYear(), t.getMonth() - 1, 1);
+    const ym = `${prev.getFullYear()}-${String(prev.getMonth()+1).padStart(2,'0')}`;
+    await generateMonthlyReport(ym);
     scheduleMonthlyReport();
-  }, next - gmt4);
+  }, msUntil);
 }
 scheduleMonthlyReport();
 
