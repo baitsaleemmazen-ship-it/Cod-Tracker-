@@ -550,6 +550,11 @@ input:focus{border-color:#0d4d25;}
     <input type="number" id="riderSel" placeholder="Enter your rider ID" inputmode="numeric">
   </div>
   <div class="card">
+    <div class="card-title">📅 Date you worked</div>
+    <input type="date" id="workDate" style="width:100%;padding:12px;border:1.5px solid #ddd;border-radius:10px;font-size:15px;background:#fafafa;" max="">
+    <div style="font-size:11px;color:#888;margin-top:6px;">Select the date shown on your Talabat screenshot</div>
+  </div>
+  <div class="card">
     <div class="card-title">🏦 Bank Receipt</div>
     <input type="file" id="bankInput" accept="image/*" onchange="previewFile(this,'bankPreview','bankImg')" style="display:none">
     <input type="file" id="bankCamera" accept="image/*" capture="environment" onchange="previewFile(this,'bankPreview','bankImg')" style="display:none">
@@ -636,8 +641,11 @@ async function doSubmit() {
       return;
     }
   } catch(e) {}
+  const workDate = document.getElementById('workDate').value;
+  if (!workDate) { msgEl.innerHTML = '<div class="msg err">Please select the date you worked.</div>'; return; }
   const fd = new FormData();
   fd.append('rider_id', riderId);
+  fd.append('work_date', workDate);
   fd.append('receipt', bankFile);
   fd.append('talabat', talabatFile);
   try {
@@ -698,6 +706,13 @@ async function doFuel() {
   el.innerHTML = '<div class="card"><div class="rider-name-badge">👤 '+data.rider_name+'</div>'+rows+(data.weeks.length>1?'<div class="total-row"><div class="total-label">Total</div><div class="total-amt">'+total.toFixed(3)+' OMR</div></div>':'')+'</div>';
 }
 
+// Set default work date to yesterday (since riders submit next day)
+const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1);
+const maxDate = new Date().toISOString().slice(0,10);
+const defaultDate = yesterday.toISOString().slice(0,10);
+document.getElementById('workDate').value = defaultDate;
+document.getElementById('workDate').max = maxDate;
+
 // Auto-fill status/fuel ID from submit tab
 document.getElementById('riderSel').addEventListener('input', e => {
   document.getElementById('statusId').value = e.target.value;
@@ -711,9 +726,8 @@ document.getElementById('riderSel').addEventListener('input', e => {
 // ─── Submit endpoint ──────────────────────────────────────────────────────────
 app.post('/submit', uploadBoth, async (req, res) => {
   try {
-    const { rider_id } = req.body;
+    const { rider_id, work_date } = req.body;
     const rider = riders.find(r => r.id === rider_id);
-    // If ID not found, create a temporary rider object and flag it
     const riderObj = rider || { id: rider_id, name: `Unknown ID: ${rider_id}` };
     if (!rider_id) return res.json({ ok: false, error: 'Please enter your ID number.' });
     const bankFile = req.files && req.files['receipt'] && req.files['receipt'][0];
@@ -722,6 +736,7 @@ app.post('/submit', uploadBoth, async (req, res) => {
     if (!talabatFile) return res.json({ ok: false, error: 'No Talabat screenshot uploaded.' });
 
     const today = new Date(new Date().getTime() + 4*60*60*1000).toISOString().slice(0, 10);
+    const talabatDate = work_date || today; // date rider actually worked
     const todayIds = getTodayIds();
     const isDuplicate = todayIds.has(rider_id);
     const flags = [];
@@ -739,7 +754,7 @@ app.post('/submit', uploadBoth, async (req, res) => {
     let aiResult = {};
     try {
       const response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-5',
+        model: 'claude-haiku-4-5-20251001',
         max_tokens: 500,
         messages: [{
           role: 'user',
@@ -776,7 +791,7 @@ Return ONLY this JSON, no markdown, no explanation:
     let talabatResult = {};
     try {
       const tRes = await anthropic.messages.create({
-        model: 'claude-sonnet-4-5',
+        model: 'claude-haiku-4-5-20251001',
         max_tokens: 300,
         messages: [{
           role: 'user',
@@ -890,7 +905,7 @@ Return ONLY this JSON, no markdown:
       needs_amount: needsAmount,
       talabat_amount: talabatResult.collected_amount || null,
       talabat_deliveries: talabatResult.deliveries || null,
-      talabat_date: talabatResult.date || null, // date rider actually worked
+      talabat_date: talabatDate, // rider-selected work date
       account_name: aiResult.account_name || null,
       beneficiary_name: aiResult.beneficiary_name || null,
       is_late: isLate,
@@ -1088,7 +1103,7 @@ async function generateFuelSheet() {
     const riderRows = riders.map((r, i) => {
       const data = riderDeliveries[r.id];
       const deliveries = data ? data.deliveries : 0;
-      const fuel = deliveries === 0 ? 0 : deliveries >= 75 ? (deliveries > 75 ? 30 : 25) : 0;
+      const fuel = deliveries === 0 ? 0 : deliveries > 75 ? 30 : deliveries >= 75 ? 25 : 0;
       return [i + 1, r.name, r.id, deliveries, fuel];
     });
 
@@ -1368,9 +1383,9 @@ async function generateMonthlyReport(yearMonth) {
 function scheduleMonthlyReport() {
   const now = new Date();
   const gmt4 = new Date(now.getTime() + 4*60*60*1000);
-  const next = new Date(gmt4.getFullYear(), gmt4.getMonth() + 1, 1, 20, 0, 0, 0); // 1st of next month 8PM
+  const next = new Date(gmt4.getFullYear(), gmt4.getMonth() + 1, 2, 20, 0, 0, 0); // 2nd of next month 8PM
   const msUntil = Math.min(Math.max(next - gmt4, 1000), 2147483647);
-  console.log(`📊 Monthly report scheduled in ${Math.round(msUntil/3600000)}h`);
+  console.log(`📊 Monthly report scheduled in ${Math.round(msUntil/3600000)}h (2nd of next month)`);
   setTimeout(async () => {
     const t = new Date(new Date().getTime() + 4*60*60*1000);
     const prev = new Date(t.getFullYear(), t.getMonth() - 1, 1);
@@ -1458,7 +1473,8 @@ app.get('/admin', requireAdmin, async (req, res) => {
           ${s.account_name ? `<div style="font-size:10px;color:#888;margin-top:2px;">👤 ${s.account_name}</div>` : ''}
           ${s.beneficiary_name ? `<div style="font-size:10px;color:#888;">→ ${s.beneficiary_name}</div>` : ''}
           <form method="POST" action="/admin/approve/${s.id}" style="margin:5px 0 3px;">
-            <input name="manual_amount" type="number" step="0.01" placeholder="Amount (OMR)" value="${s.amount || ''}" style="width:100%;padding:4px 7px;border:1px solid #ddd;border-radius:6px;font-size:12px;margin-bottom:4px;" ${s.amount ? '' : 'required'}>
+            <input name="manual_amount" type="number" step="0.001" placeholder="Bank Amount (OMR)" value="${s.amount || ''}" style="width:100%;padding:4px 7px;border:1px solid #ddd;border-radius:6px;font-size:12px;margin-bottom:4px;" ${s.amount ? '' : 'required'}>
+            <input name="manual_talabat" type="number" step="0.01" placeholder="Talabat Amount (OMR)" value="${s.talabat_amount || ''}" style="width:100%;padding:4px 7px;border:1px solid #ddd;border-radius:6px;font-size:12px;margin-bottom:4px;">
             <div style="display:flex;gap:4px;flex-wrap:wrap;">
               <button class="act-btn ok-btn">✓ Approve</button>
               ${hasBank ? `<a href="/receipt/${s.id}" target="_blank" class="act-btn" style="background:#e8f0fe;color:#1a73e8;text-decoration:none;">👁 Bank</a>` : ''}
@@ -1588,6 +1604,9 @@ app.post('/admin/approve/:id', requireAdmin, async (req, res) => {
     sub.status = 'approved';
     if (req.body.manual_amount) {
       sub.amount = parseFloat(req.body.manual_amount);
+    }
+    if (req.body.manual_talabat) {
+      sub.talabat_amount = parseFloat(req.body.manual_talabat);
     }
     sub.bank = sub.bank || 'Bank';
     saveSubmissions();
